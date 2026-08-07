@@ -1,6 +1,6 @@
 export type Strategy = "economy" | "balanced" | "quality";
 export type Region = "ANY_REGION" | "AWS_US" | "AWS_EU";
-export type MemoryType = "profile" | "episode" | "event" | "agent_case" | "policy";
+export type MemoryType = "profile" | "episode" | "event" | "agent_case" | "agent_skill" | "policy";
 export type ProviderMode = "demo" | "live" | "fallback";
 export type MemoryRelationType = "duplicate" | "contradicts" | "depends_on" | "complements";
 
@@ -29,6 +29,8 @@ export type MemoryCandidate = {
   relevance: number;
   confidence: number;
   successLift: number;
+  historicalOutcomeLift?: number;
+  learnedCaseId?: string;
   recency?: number;
   requiredFacts?: string[];
   relationships?: Array<Omit<MemoryRelationship, "sourceId">>;
@@ -36,7 +38,16 @@ export type MemoryCandidate = {
   selected?: boolean;
   utilityPer1k?: number;
   decision?: string;
-  decisionCode?: "pinned" | "selected" | "redundant" | "contradiction" | "low_value" | "irrelevant";
+  decisionCode?:
+    | "pinned"
+    | "selected"
+    | "learned_case"
+    | "dependency"
+    | "redundant"
+    | "contradiction"
+    | "stale"
+    | "low_value"
+    | "irrelevant";
 };
 
 export type ToolOption = {
