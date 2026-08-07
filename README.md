@@ -1,19 +1,21 @@
 # TokenOS
 
-TokenOS is an inference compiler for production agents. A user gives it an objective and an execution contract: cost ceiling, latency SLA, quality floor, strategy, and data region. TokenOS retrieves long-term memory, pins policy constraints, evaluates thousands of model-memory-tool portfolios, executes the winning plan, evaluates the outcome, and records the economics.
+TokenOS is an economic memory compiler for production agents. A user gives it an objective and an execution contract: cost ceiling, latency SLA, quality floor, memory budget, strategy, and data region. TokenOS retrieves long-term memory, pins policy constraints, evaluates every candidate-memory portfolio, executes the winning context, evaluates the outcome, and records the economics.
 
 The default build is a complete deterministic demo, so the core workflow works without credentials. Provider credentials switch the same workflow to EverOS and Snowflake.
 
 ## Why it is technically different
 
-- Exact portfolio search across models, memories, and tools instead of a single model-routing heuristic.
-- Hard feasibility checks for budget, latency, quality, required tools, critical memories, and region before inference.
-- Pareto pruning exposes the cost-quality frontier and blocked alternatives.
-- Memory is treated as an economic input: each item has token cost, expected success lift, utility, and a visible selected/pruned decision.
-- Post-run evaluation checks policy, tool use, regional fit, and answer completeness.
-- The feedback loop writes the interaction to EverOS and the plan economics to Snowflake.
+- Exact search across all candidate-memory subsets instead of top-k similarity retrieval. The incident demo evaluates all `2^15 = 32,768` portfolios.
+- Hard feasibility checks for token and dollar budget, latency, quality, required facts, required tools, critical memories, dependencies, and region before inference.
+- A memory relationship graph prices duplicates, contradictions, dependencies, and complements into each portfolio.
+- Marginal utility per token explains why each memory was pinned, purchased, or rejected.
+- The baseline and compiled context use the same model, temperature, task, and tools so the token and cost delta is controlled.
+- Counterfactual runs remove pinned, purchased, and rejected-control memories to test whether safety, facts, or outcome quality changed.
+- Post-run evaluation checks policy, fact coverage, tool use, regional fit, and answer completeness.
+- The feedback loop writes the interaction to EverOS and a complete evidence payload to Snowflake.
 
-With the included scenarios, the compiler enumerates 6,144 portfolios per run.
+The default incident scenario buys a 194-token safe context from 15 candidates and refuses contracts below that proven safety floor.
 
 ## Run it
 
@@ -49,16 +51,27 @@ The Snowflake database and schema must already exist. TokenOS creates the ledger
 
 1. **Recall:** hybrid-search EverOS for episodic and profile memory.
 2. **Constrain:** pin policy-critical memory and required tools.
-3. **Optimize:** enumerate every model, memory, and tool subset, reject violations, score strategies, and Pareto-prune the survivors.
-4. **Execute:** invoke the selected model through Snowflake Cortex REST.
-5. **Evaluate:** score the response against structural and policy checks.
-6. **Learn:** add the interaction to EverOS and persist run economics through the Snowflake SQL API.
+3. **Optimize:** enumerate every memory subset, reject hard-constraint violations, score the surviving portfolios, and expose the Pareto frontier.
+4. **Execute:** run a full-memory baseline and compiled-memory variant through the same Snowflake Cortex model and generation configuration.
+5. **Evaluate:** score the answer, run three causal ablations, and verify policies and required facts.
+6. **Learn:** add the interaction to EverOS and persist usage, exposure, graph, evaluation, and ablation evidence through the Snowflake SQL API.
+
+## Acceptance coverage
+
+`npm run check` runs lint, 17 behavioral tests, server and client type-checks, and the production build. The suite covers:
+
+- exact optimization, strategy tradeoffs, graph decisions, dependency enforcement, and minimum-safe-budget refusal;
+- deterministic and live-shaped EverOS retrieval, Cortex inference, and EverOS memory write-back;
+- Snowflake SQL table creation, complete evidence insertion, and identifier safety;
+- the streamed API lifecycle, same-model controlled comparison, ablations, recent-run ledger, validation, and pre-inference refusal.
 
 ## Useful commands
 
 ```bash
 npm run lint
+npm test
 npm run build
+npm run check
 npm start
 ```
 

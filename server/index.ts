@@ -1,5 +1,6 @@
 import "dotenv/config";
 import express from "express";
+import { pathToFileURL } from "node:url";
 import { scenarios } from "../shared/catalog.ts";
 import type {
   CounterfactualResult,
@@ -20,9 +21,9 @@ import {
   writeInteractionToEverOS,
 } from "./providers.ts";
 
-const app = express();
+export const app = express();
 const port = Number(process.env.PORT ?? 8787);
-const recentRuns: RunResult[] = [];
+export const recentRuns: RunResult[] = [];
 
 app.use(express.json({ limit: "1mb" }));
 
@@ -403,6 +404,9 @@ app.post("/api/run", async (request, response) => {
   }
 });
 
-app.listen(port, "127.0.0.1", () => {
-  console.log(`TokenOS compiler listening on http://127.0.0.1:${port}`);
-});
+const entrypoint = process.argv[1];
+if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
+  app.listen(port, "127.0.0.1", () => {
+    console.log(`TokenOS compiler listening on http://127.0.0.1:${port}`);
+  });
+}

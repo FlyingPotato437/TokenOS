@@ -153,7 +153,13 @@ function formatAnswer(answer: string) {
   return output;
 }
 
-function SavingsProof({ comparison }: { comparison: ExecutionComparison | null }) {
+function SavingsProof({
+  comparison,
+  ledger,
+}: {
+  comparison: ExecutionComparison | null;
+  ledger: RunResult["ledger"] | null;
+}) {
   if (!comparison) {
     return (
       <section className="savings-proof empty-savings">
@@ -170,7 +176,7 @@ function SavingsProof({ comparison }: { comparison: ExecutionComparison | null }
       animate={{ opacity: 1, y: 0 }}
     >
       <div className="hero-saving">
-        <span>MEASURED CORTEX COST REDUCTION</span>
+        <span>{comparison.optimized.usage.estimated ? "MODELED CORTEX COST REDUCTION" : "MEASURED CORTEX COST REDUCTION"}</span>
         <strong>{percent(comparison.costReduction)}</strong>
         <small><TrendDown size={15} weight="bold" /> Same model. Fewer purchased memories.</small>
       </div>
@@ -188,7 +194,7 @@ function SavingsProof({ comparison }: { comparison: ExecutionComparison | null }
         <div>
           <dt>INPUT TOKENS REMOVED</dt>
           <dd>{percent(comparison.tokenReduction)}</dd>
-          <small>actual prompt usage</small>
+          <small>{comparison.optimized.usage.estimated ? "controlled replay usage" : "provider-reported usage"}</small>
         </div>
         <div>
           <dt>REQUIRED FACTS</dt>
@@ -196,6 +202,12 @@ function SavingsProof({ comparison }: { comparison: ExecutionComparison | null }
           <small>{comparison.sameModel ? "model held constant" : "model changed"}</small>
         </div>
       </dl>
+      <div className="experiment-contract" aria-label="Controlled experiment contract">
+        <div><span>MODEL CONTROL</span><b>{comparison.modelId}</b></div>
+        <div><span>GENERATION CONTROL</span><b>TEMP {comparison.generationConfig.temperature} · MAX {comparison.generationConfig.maxCompletionTokens}</b></div>
+        <div><span>MEASUREMENT</span><b>{comparison.measurementMode === "live" ? "LIVE CORTEX USAGE" : comparison.measurementMode === "demo" ? "DETERMINISTIC REPLAY" : "MATCHED FALLBACK"}</b></div>
+        <div><span>EVIDENCE LEDGER</span><b>{ledger?.mode === "snowflake" ? "SNOWFLAKE SQL" : ledger?.mode === "fallback" ? "LOCAL FALLBACK" : "LOCAL PROOF"}</b></div>
+      </div>
     </motion.section>
   );
 }
@@ -387,6 +399,7 @@ function CounterfactualProof({
             <article key={item.memoryId} className={item.policyPassed ? "safe" : "failed"}>
               <div>
                 <span>{item.role === "rejected_control" ? "REJECTED CONTROL" : item.role.toUpperCase()}</span>
+                <small>{item.mode === "live" ? "LIVE CORTEX" : item.mode === "demo" ? "REPLAY" : "FALLBACK"}</small>
                 <b>{item.outcomeChanged ? "OUTCOME CHANGED" : "NO MATERIAL CHANGE"}</b>
               </div>
               <p>{item.memoryContent}</p>
@@ -394,6 +407,7 @@ function CounterfactualProof({
               <dl>
                 <div><dt>QUALITY DELTA</dt><dd>{(item.qualityDelta * 100).toFixed(1)} pt</dd></div>
                 <div><dt>POLICY</dt><dd>{item.policyPassed ? "PASS" : "FAIL"}</dd></div>
+                <div><dt>REQUIRED FACTS</dt><dd>{item.requiredFactsPreserved ? "PASS" : "FAIL"}</dd></div>
                 <div><dt>RECHECK TOKENS</dt><dd>{item.promptTokens.toLocaleString()}</dd></div>
               </dl>
             </article>
@@ -447,6 +461,7 @@ function App() {
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [comparison, setComparison] = useState<ExecutionComparison | null>(null);
   const [counterfactuals, setCounterfactuals] = useState<CounterfactualResult[]>([]);
+  const [ledger, setLedger] = useState<RunResult["ledger"] | null>(null);
   const [error, setError] = useState("");
   const [completedRuns, setCompletedRuns] = useState(0);
   const runSurfaceRef = useRef<HTMLElement>(null);
@@ -477,6 +492,7 @@ function App() {
     setEvaluation(null);
     setComparison(null);
     setCounterfactuals([]);
+    setLedger(null);
     setError("");
     if (clearObjective) setObjective(scenario.objective);
   }
@@ -521,6 +537,7 @@ function App() {
       setEvaluation(result.evaluation);
       setComparison(result.comparison);
       setCounterfactuals(result.counterfactuals);
+      setLedger(result.ledger);
       setProviders(result.providers);
       setRunState("complete");
       setCompletedRuns((count) => count + 1);
@@ -603,8 +620,22 @@ function App() {
               ))}
             </div>
             <div className="constraint-control">
-              <div><label htmlFor="memory-budget">MEMORY TOKEN BUDGET</label><output>{constraints.maxMemoryTokens} tok</output></div>
-              <input id="memory-budget" type="range" min="160" max="900" step="20" value={constraints.maxMemoryTokens} onChange={(event) => setConstraints((current) => ({ ...current, maxMemoryTokens: Number(event.target.value) }))} />
+              <div>
+                <label htmlFor="memory-budget">MEMORY TOKEN BUDGET</label>
+                <output htmlFor="memory-budget">
+                  <input
+                    type="number"
+                    min="1"
+                    max="900"
+                    step="1"
+                    aria-label="Exact memory token budget"
+                    value={constraints.maxMemoryTokens}
+                    onChange={(event) => setConstraints((current) => ({ ...current, maxMemoryTokens: Math.max(1, Math.min(900, Number(event.target.value) || 1)) }))}
+                  />
+                  <span>tok</span>
+                </output>
+              </div>
+              <input id="memory-budget" type="range" min="160" max="900" step="1" value={constraints.maxMemoryTokens} onChange={(event) => setConstraints((current) => ({ ...current, maxMemoryTokens: Number(event.target.value) }))} />
             </div>
             <div className="constraint-control">
               <div><label htmlFor="quality">OUTCOME FLOOR</label><output>{percent(constraints.minSuccess)}</output></div>
@@ -638,6 +669,11 @@ function App() {
           {error && (
             <motion.div className="global-error" role="alert" initial={{ opacity: 0, y: -6 }} animate={{ opacity: 1, y: 0 }}>
               <Warning size={17} weight="fill" /><span><b>Compiler refused the run.</b>{error}</span>
+              {compile && !compile.selected.feasible && (
+                <button type="button" onClick={() => setConstraints((current) => ({ ...current, maxMemoryTokens: compile.minimumSafeMemoryTokens }))}>
+                  APPLY {compile.minimumSafeMemoryTokens} TOKEN SAFE FLOOR
+                </button>
+              )}
             </motion.div>
           )}
         </AnimatePresence>
@@ -648,11 +684,10 @@ function App() {
             <div className="progress-readout"><span>{Math.round(progress * 100)}%</span><i><b style={{ transform: `scaleX(${progress})` }} /></i></div>
           </div>
           <PhaseRail events={events} />
-          <SavingsProof comparison={comparison} />
+          <SavingsProof comparison={comparison} ledger={ledger} />
 
           <div className="product-grid">
             <div className="primary-stack">
-              <MemoryAuction compile={compile} liveMemories={liveMemories} />
               <section className="surface-panel answer-panel">
                 <div className="surface-heading">
                   <div><span>COMPILED AGENT OUTPUT</span><h2>{answer ? "The purchased context produced this decision." : "The optimized answer will appear here."}</h2></div>
@@ -664,6 +699,7 @@ function App() {
                   <div className="technical-empty answer-empty"><Lightning size={24} /><div><strong>One run creates five pieces of evidence.</strong><p>Baseline, optimized context, token delta, safety result, and counterfactual ablations.</p></div></div>
                 )}
               </section>
+              <MemoryAuction compile={compile} liveMemories={liveMemories} />
               <CounterfactualProof counterfactuals={counterfactuals} />
             </div>
 

@@ -9,6 +9,8 @@
     "dev:api": "tsx watch server/index.ts",
     "build": "tsc -b && tsc --noEmit -p tsconfig.server.json && vite build",
     "lint": "eslint .",
+    "test": "tsx --test --test-concurrency=1 server/*.test.ts",
+    "check": "npm run lint && npm run test && npm run build",
     "preview": "vite preview",
     "start": "tsx server/index.ts"
   },

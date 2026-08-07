@@ -454,10 +454,44 @@ main,
 }
 
 .constraint-control output {
+  display: flex;
+  align-items: center;
+  gap: 0.3rem;
   color: var(--ink);
   font-family: var(--mono);
   font-size: 0.72rem;
   font-variant-numeric: tabular-nums;
+}
+
+.constraint-control output input {
+  width: 3.5rem;
+  padding: 0.15rem 0.2rem;
+  border: 0;
+  border-bottom: 1px solid transparent;
+  border-radius: 0;
+  color: var(--ink);
+  background: transparent;
+  font: inherit;
+  text-align: right;
+  appearance: textfield;
+  transition: border-color 180ms ease, background 180ms ease;
+}
+
+.constraint-control output input::-webkit-inner-spin-button,
+.constraint-control output input::-webkit-outer-spin-button {
+  margin: 0;
+  appearance: none;
+}
+
+.constraint-control output input:hover,
+.constraint-control output input:focus {
+  border-color: var(--accent-deep);
+  background: rgba(255, 255, 255, 0.55);
+  outline: none;
+}
+
+.constraint-control output input:focus-visible {
+  box-shadow: 0 0 0 2px rgba(41, 181, 232, 0.24);
 }
 
 .constraint-control input[type="range"] {
@@ -559,7 +593,7 @@ main,
 
 .global-error {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 0.6rem;
   margin-top: 0.75rem;
   padding: 0.8rem 0.95rem;
@@ -577,6 +611,32 @@ main,
 
 .global-error b {
   color: var(--ink);
+}
+
+.global-error button {
+  min-height: 2.1rem;
+  margin-left: auto;
+  padding: 0 0.75rem;
+  border: 1px solid rgba(194, 63, 87, 0.35);
+  border-radius: 0.5rem;
+  color: var(--error);
+  background: rgba(255, 255, 255, 0.76);
+  font-family: var(--mono);
+  font-size: 0.48rem;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: color 180ms ease, background 180ms ease, transform 180ms ease;
+}
+
+.global-error button:hover {
+  color: #fff;
+  background: var(--error);
+}
+
+.global-error button:active {
+  transform: translateY(1px);
 }
 
 .run-surface {
@@ -821,6 +881,45 @@ main,
   margin-top: 0.25rem;
   color: var(--faint);
   font-size: 0.48rem;
+}
+
+.experiment-contract {
+  display: grid;
+  grid-column: 1 / -1;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  border-top: 1px solid var(--line);
+  background: #f6fbfd;
+}
+
+.experiment-contract > div {
+  min-width: 0;
+  padding: 0.72rem 1rem;
+}
+
+.experiment-contract > div + div {
+  border-left: 1px solid var(--line);
+}
+
+.experiment-contract span,
+.experiment-contract b {
+  display: block;
+  overflow: hidden;
+  font-family: var(--mono);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.experiment-contract span {
+  color: var(--faint);
+  font-size: 0.4rem;
+  letter-spacing: 0.07em;
+}
+
+.experiment-contract b {
+  margin-top: 0.25rem;
+  color: var(--ink-soft);
+  font-size: 0.52rem;
+  font-weight: 600;
 }
 
 .empty-savings {
@@ -1313,32 +1412,37 @@ main,
 
 .ablation-list {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 0.75rem;
-  padding: 0.85rem;
-  background: #f5fafc;
-}
-
-.ablation-list article {
-  display: flex;
-  min-width: 0;
-  min-height: 12.5rem;
-  flex-direction: column;
-  padding: 0.9rem;
-  border: 1px solid var(--line);
-  border-radius: 0.7rem;
   background: var(--surface);
 }
 
+.ablation-list article {
+  display: grid;
+  grid-template-areas:
+    "status memory metrics"
+    "status detail metrics";
+  grid-template-columns: 8.5rem minmax(0, 1fr) minmax(15rem, 0.75fr);
+  grid-template-rows: auto auto;
+  min-width: 0;
+  gap: 0.25rem 1.1rem;
+  padding: 1rem 1.1rem;
+  border-left: 3px solid var(--accent-deep);
+  background: var(--surface);
+}
+
+.ablation-list article + article {
+  border-top: 1px solid var(--line);
+}
+
 .ablation-list article.failed {
-  border-color: rgba(194, 63, 87, 0.28);
+  border-left-color: var(--error);
 }
 
 .ablation-list article > div:first-child {
+  grid-area: status;
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.45rem;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 0.3rem;
   font-family: var(--mono);
   font-size: 0.42rem;
 }
@@ -1348,8 +1452,15 @@ main,
 }
 
 .ablation-list article > div:first-child b {
+  margin-top: 0.3rem;
   color: var(--signal);
   font-weight: 600;
+}
+
+.ablation-list article > div:first-child small {
+  color: var(--faint);
+  font-size: 0.38rem;
+  letter-spacing: 0.06em;
 }
 
 .ablation-list article.failed > div:first-child b {
@@ -1357,24 +1468,43 @@ main,
 }
 
 .ablation-list article > p {
-  margin: 0.8rem 0 0.55rem;
+  grid-area: memory;
+  margin: 0;
   color: var(--ink-soft);
-  font-size: 0.7rem;
+  font-size: 0.72rem;
   line-height: 1.45;
 }
 
 .ablation-list article > small {
+  grid-area: detail;
   color: var(--muted);
   font-size: 0.58rem;
   line-height: 1.42;
 }
 
 .ablation-list dl {
+  grid-area: metrics;
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 0.35rem;
-  margin: auto 0 0;
-  padding-top: 0.75rem;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-self: stretch;
+  gap: 0;
+  margin: 0;
+  border-left: 1px solid var(--line);
+}
+
+.ablation-list dl > div {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  justify-content: center;
+  padding: 0.25rem 0.75rem;
+}
+
+.ablation-list dl > div:nth-child(even) {
+  border-left: 1px solid var(--line);
+}
+
+.ablation-list dl > div:nth-child(n + 3) {
   border-top: 1px solid var(--line);
 }
 
@@ -1720,6 +1850,18 @@ main,
     min-height: 8rem;
   }
 
+  .experiment-contract {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .experiment-contract > div:nth-child(3) {
+    border-left: 0;
+  }
+
+  .experiment-contract > div:nth-child(n + 3) {
+    border-top: 1px solid var(--line);
+  }
+
   .empty-savings {
     grid-template-columns: 1fr;
   }
@@ -1800,7 +1942,6 @@ main,
   }
 
   .memory-grid,
-  .ablation-list,
   .proof-stack {
     grid-template-columns: 1fr;
   }
@@ -1823,7 +1964,41 @@ main,
   }
 
   .ablation-list article {
-    min-height: 11rem;
+    grid-template-areas:
+      "status"
+      "memory"
+      "detail"
+      "metrics";
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    gap: 0.6rem;
+    min-height: 0;
+  }
+
+  .ablation-list article > div:first-child {
+    display: grid;
+    grid-template-columns: auto 1fr auto;
+    align-items: center;
+  }
+
+  .ablation-list article > div:first-child b {
+    margin: 0;
+    text-align: right;
+  }
+
+  .ablation-list dl {
+    min-height: 5rem;
+    border-top: 1px solid var(--line);
+    border-left: 0;
+  }
+
+  .global-error {
+    flex-wrap: wrap;
+  }
+
+  .global-error button {
+    width: 100%;
+    margin-left: 0;
   }
 
   .relationship-list {
@@ -1887,6 +2062,16 @@ main,
 
   .comparison-metrics dd {
     font-size: 1rem;
+  }
+
+  .experiment-contract {
+    grid-template-columns: 1fr;
+  }
+
+  .experiment-contract > div + div,
+  .experiment-contract > div:nth-child(3) {
+    border-top: 1px solid var(--line);
+    border-left: 0;
   }
 
   .relation {
