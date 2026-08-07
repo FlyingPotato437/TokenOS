@@ -134,12 +134,22 @@ export async function persistRunToSnowflake(
         BASELINE_COST FLOAT,
         BASELINE_PROMPT_TOKENS NUMBER,
         OPTIMIZED_PROMPT_TOKENS NUMBER,
+        BASELINE_COMPLETION_TOKENS NUMBER,
+        OPTIMIZED_COMPLETION_TOKENS NUMBER,
         TOKEN_REDUCTION FLOAT,
         COST_REDUCTION FLOAT,
         REQUIRED_FACTS_PRESERVED BOOLEAN,
+        BASELINE_EVALUATION_SCORE FLOAT,
+        OPTIMIZED_EVALUATION_SCORE FLOAT,
+        BASELINE_POLICY_PASSED BOOLEAN,
+        OPTIMIZED_POLICY_PASSED BOOLEAN,
+        MEASUREMENT_MODE STRING,
         PROVIDER_MODE STRING,
+        GENERATION_CONFIG VARIANT,
+        MEMORY_EXPOSURE_JSON VARIANT,
         PLAN_JSON VARIANT,
-        COUNTERFACTUAL_JSON VARIANT
+        COUNTERFACTUAL_JSON VARIANT,
+        EVIDENCE_JSON VARIANT
       )`,
     });
 
@@ -157,15 +167,39 @@ export async function persistRunToSnowflake(
       evaluationScore: run.evaluation.score,
       promptTokens: run.usage.promptTokens,
       completionTokens: run.usage.completionTokens,
-      baselineCost: run.compile.baseline.estimatedCost,
+      baselineCost: run.comparison.baseline.usage.actualCost,
       baselinePromptTokens: run.comparison.baseline.usage.promptTokens,
       optimizedPromptTokens: run.comparison.optimized.usage.promptTokens,
+      baselineCompletionTokens: run.comparison.baseline.usage.completionTokens,
+      optimizedCompletionTokens: run.comparison.optimized.usage.completionTokens,
       tokenReduction: run.comparison.tokenReduction,
       costReduction: run.comparison.costReduction,
       requiredFactsPreserved: run.comparison.requiredFactsPreserved,
+      baselineEvaluationScore: run.comparison.baseline.evaluation.score,
+      optimizedEvaluationScore: run.comparison.optimized.evaluation.score,
+      baselinePolicyPassed: run.comparison.baseline.evaluation.policyPassed,
+      optimizedPolicyPassed: run.comparison.optimized.evaluation.policyPassed,
+      measurementMode: run.comparison.measurementMode,
       providerMode: run.providers.snowflake,
+      generationConfig: run.comparison.generationConfig,
+      memoryExposure: run.compile.memories.map((memory) => ({
+        id: memory.id,
+        source: memory.source,
+        tokens: memory.tokens,
+        selected: memory.selected,
+        decision: memory.decisionCode,
+        utilityPer1k: memory.utilityPer1k,
+      })),
       plan: run.compile.selected,
       counterfactuals: run.counterfactuals,
+      evidence: {
+        comparison: run.comparison,
+        evaluation: run.evaluation,
+        counterfactuals: run.counterfactuals,
+        relationshipEdges: run.compile.relationshipEdges,
+        evaluatedCount: run.compile.evaluatedCount,
+        feasibleCount: run.compile.feasibleCount,
+      },
     });
 
     await submitStatement({
@@ -173,8 +207,10 @@ export async function persistRunToSnowflake(
         RUN_ID, CREATED_AT, SCENARIO_ID, OBJECTIVE, MODEL_NAME, MEMORY_COUNT, TOOL_COUNT,
         ESTIMATED_COST, ACTUAL_COST, SUCCESS_PROBABILITY, EVALUATION_SCORE, PROMPT_TOKENS,
         COMPLETION_TOKENS, BASELINE_COST, BASELINE_PROMPT_TOKENS, OPTIMIZED_PROMPT_TOKENS,
-        TOKEN_REDUCTION, COST_REDUCTION, REQUIRED_FACTS_PRESERVED, PROVIDER_MODE, PLAN_JSON,
-        COUNTERFACTUAL_JSON
+        BASELINE_COMPLETION_TOKENS, OPTIMIZED_COMPLETION_TOKENS, TOKEN_REDUCTION, COST_REDUCTION,
+        REQUIRED_FACTS_PRESERVED, BASELINE_EVALUATION_SCORE, OPTIMIZED_EVALUATION_SCORE,
+        BASELINE_POLICY_PASSED, OPTIMIZED_POLICY_PASSED, MEASUREMENT_MODE, PROVIDER_MODE,
+        GENERATION_CONFIG, MEMORY_EXPOSURE_JSON, PLAN_JSON, COUNTERFACTUAL_JSON, EVIDENCE_JSON
       )
       SELECT
         value:runId::STRING,
@@ -193,12 +229,22 @@ export async function persistRunToSnowflake(
         value:baselineCost::FLOAT,
         value:baselinePromptTokens::NUMBER,
         value:optimizedPromptTokens::NUMBER,
+        value:baselineCompletionTokens::NUMBER,
+        value:optimizedCompletionTokens::NUMBER,
         value:tokenReduction::FLOAT,
         value:costReduction::FLOAT,
         value:requiredFactsPreserved::BOOLEAN,
+        value:baselineEvaluationScore::FLOAT,
+        value:optimizedEvaluationScore::FLOAT,
+        value:baselinePolicyPassed::BOOLEAN,
+        value:optimizedPolicyPassed::BOOLEAN,
+        value:measurementMode::STRING,
         value:providerMode::STRING,
+        value:generationConfig::VARIANT,
+        value:memoryExposure::VARIANT,
         value:plan::VARIANT,
-        value:counterfactuals::VARIANT
+        value:counterfactuals::VARIANT,
+        value:evidence::VARIANT
       FROM (SELECT PARSE_JSON(?) AS value)`,
       bindings: { "1": { type: "TEXT", value: payload } },
     });

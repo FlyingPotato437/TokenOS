@@ -101,6 +101,7 @@ export type CounterfactualPlan = {
   plan: PlanCandidate;
   expectedQualityDelta: number;
   expectedPolicyPassed: boolean;
+  expectedRequiredFactsPreserved: boolean;
 };
 
 export type CompileResult = {
@@ -152,6 +153,12 @@ export type ExecutionComparison = {
   costReduction: number;
   requiredFactsPreserved: boolean;
   sameModel: boolean;
+  modelId: string;
+  measurementMode: ProviderMode;
+  generationConfig: {
+    temperature: number;
+    maxCompletionTokens: number;
+  };
 };
 
 export type CounterfactualResult = {
@@ -161,7 +168,9 @@ export type CounterfactualResult = {
   promptTokens: number;
   qualityDelta: number;
   policyPassed: boolean;
+  requiredFactsPreserved: boolean;
   outcomeChanged: boolean;
+  mode: ProviderMode;
   detail: string;
 };
 

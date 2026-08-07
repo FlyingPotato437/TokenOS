@@ -199,14 +199,10 @@ function thinFrontier(frontier: PlanCandidate[], selectedId: string) {
   return thinned.sort((a, b) => a.memoryTokens - b.memoryTokens);
 }
 
-function sameMemorySet(candidate: PlanCandidate, memoryIds: string[]) {
-  if (candidate.memoryIds.length !== memoryIds.length) return false;
-  const target = new Set(memoryIds);
-  return candidate.memoryIds.every((id) => target.has(id));
-}
+const memorySetKey = (memoryIds: string[]) => [...memoryIds].sort().join("|");
 
 function buildCounterfactualPlans(
-  candidates: PlanCandidate[],
+  candidatesByMemorySet: Map<string, PlanCandidate>,
   selected: PlanCandidate,
   baseline: PlanCandidate,
   memories: MemoryCandidate[],
@@ -228,7 +224,7 @@ function buildCounterfactualPlans(
 
   return chosen.flatMap(({ memory, role, source }, index) => {
     const ablatedIds = source.memoryIds.filter((id) => id !== memory.id);
-    const plan = candidates.find((candidate) => sameMemorySet(candidate, ablatedIds));
+    const plan = candidatesByMemorySet.get(memorySetKey(ablatedIds));
     if (!plan) return [];
     const expectedQualityDelta = source.successProbability - plan.successProbability;
     return [{
@@ -238,8 +234,8 @@ function buildCounterfactualPlans(
       role,
       plan,
       expectedQualityDelta,
-      expectedPolicyPassed: !plan.blockers.includes("memory policy") &&
-        !plan.blockers.includes("required fact coverage"),
+      expectedPolicyPassed: !plan.blockers.includes("memory policy"),
+      expectedRequiredFactsPreserved: !plan.blockers.includes("required fact coverage"),
     }];
   });
 }
@@ -270,6 +266,9 @@ export function compileExecutionPlan(
       criticalMemoryIds,
       `portfolio-${index + 1}`,
     ),
+  );
+  const candidatesByMemorySet = new Map(
+    candidates.map((candidate) => [memorySetKey(candidate.memoryIds), candidate]),
   );
 
   const feasible = candidates.filter((candidate) => candidate.feasible);
@@ -317,10 +316,17 @@ export function compileExecutionPlan(
 
   const selectedIds = new Set(selected.memoryIds);
   const memories = retrievedMemories.map((memory) => {
-    const utilityPer1k =
-      (memory.successLift * memory.relevance * memory.confidence * (memory.recency ?? 0.7) * 1000) /
-      memory.tokens;
     const isSelected = selectedIds.has(memory.id);
+    const comparisonIds = isSelected
+      ? selected.memoryIds.filter((id) => id !== memory.id)
+      : [...selected.memoryIds, memory.id];
+    const comparisonPlan = candidatesByMemorySet.get(memorySetKey(comparisonIds));
+    const marginalQuality = comparisonPlan
+      ? isSelected
+        ? selected.successProbability - comparisonPlan.successProbability
+        : comparisonPlan.successProbability - selected.successProbability
+      : 0;
+    const utilityPer1k = (marginalQuality * 1000) / memory.tokens;
     const selectedDuplicate = relationships.find(
       (edge) =>
         edge.sourceId === memory.id && edge.type === "duplicate" && selectedIds.has(edge.targetId),
@@ -367,7 +373,7 @@ export function compileExecutionPlan(
     minimumSafeCost: minimumSafe.estimatedCost,
     minimumSafeMemoryTokens: minimumSafe.memoryTokens,
     counterfactualPlans: buildCounterfactualPlans(
-      candidates,
+      candidatesByMemorySet,
       selected,
       baseline,
       retrievedMemories,

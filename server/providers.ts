@@ -22,6 +22,11 @@ type InferenceResult = {
   detail: string;
 };
 
+export const CORTEX_GENERATION_CONFIG = {
+  temperature: 0,
+  maxCompletionTokens: 600,
+} as const;
+
 const tokenEstimate = (text: string) => Math.max(1, Math.ceil(text.length / 4));
 
 function configured(value: string | undefined) {
@@ -113,9 +118,12 @@ function mergeWithWorkspacePolicies(
   scenario: Scenario,
   liveMemories: MemoryCandidate[],
 ): MemoryCandidate[] {
-  const policies = scenario.memories.filter((memory) => memory.policyCritical);
-  const supplemental = scenario.memories.filter((memory) => !memory.policyCritical);
-  const merged = [...policies, ...liveMemories];
+  const anchors = scenario.memories.filter(
+    (memory) => memory.policyCritical || (memory.requiredFacts?.length ?? 0) > 0,
+  );
+  const anchorIds = new Set(anchors.map((memory) => memory.id));
+  const supplemental = scenario.memories.filter((memory) => !anchorIds.has(memory.id));
+  const merged = [...anchors, ...liveMemories];
   const existing = new Set(merged.map((memory) => memory.content.toLowerCase()));
 
   for (const memory of supplemental) {
@@ -250,17 +258,20 @@ export async function executeInference(
   memories: MemoryCandidate[],
   plan: PlanCandidate = compile.selected,
   variant: "baseline" | "optimized" | "counterfactual" = "optimized",
+  forceReplay = false,
 ): Promise<InferenceResult> {
   const accountUrl = process.env.SNOWFLAKE_ACCOUNT_URL;
   const pat = process.env.SNOWFLAKE_PAT;
   const prompt = buildSystemPrompt(scenario, objective, plan, memories, variant);
 
-  if (!configured(accountUrl) || !configured(pat)) {
+  if (forceReplay || !configured(accountUrl) || !configured(pat)) {
     return {
       answer: scenario.demoAnswer,
       usage: estimateUsage(scenario.demoAnswer, prompt, plan),
-      mode: "demo",
-      detail: `Using the deterministic Cortex ${variant} replay.`,
+      mode: forceReplay ? "fallback" : "demo",
+      detail: forceReplay
+        ? `Using a matched deterministic Cortex ${variant} replay after a provider mismatch.`
+        : `Using the deterministic Cortex ${variant} replay.`,
     };
   }
 
@@ -277,7 +288,8 @@ export async function executeInference(
       body: JSON.stringify({
         model,
         messages: [{ role: "user", content: prompt }],
-        max_completion_tokens: 600,
+        temperature: CORTEX_GENERATION_CONFIG.temperature,
+        max_completion_tokens: CORTEX_GENERATION_CONFIG.maxCompletionTokens,
       }),
       signal: AbortSignal.timeout(60_000),
     });
