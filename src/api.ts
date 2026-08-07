@@ -1,14 +1,69 @@
+import type { ProviderMode, Scenario } from "../shared/contracts";
 import type {
-  ProviderStatus,
-  RunEvent,
-  RunRequest,
-  Scenario,
-} from "../shared/contracts";
+  RavenProviderStatus,
+  RavenRunEvent,
+  RavenRunEventType,
+  RavenRunRequest,
+} from "../shared/raven-contract";
 
 export type ScenarioSummary = Pick<
   Scenario,
-  "id" | "name" | "tag" | "objective" | "valueAtRisk" | "policy" | "tools"
+  "id" | "name" | "tag" | "objective" | "policy" | "tools"
 >;
+
+const providerModes = new Set<ProviderMode>(["demo", "live", "fallback"]);
+const eventTypes = new Set<RavenRunEventType>([
+  "run.started",
+  "recall.started",
+  "recall.completed",
+  "price.completed",
+  "connect.completed",
+  "compile.started",
+  "compile.completed",
+  "compile.refused",
+  "raven.started",
+  "uncontrolled.completed",
+  "governed.completed",
+  "comparison.completed",
+  "learn.started",
+  "learn.completed",
+  "run.completed",
+  "run.error",
+]);
+
+function providerMode(value: unknown): ProviderMode {
+  return providerModes.has(value as ProviderMode) ? (value as ProviderMode) : "fallback";
+}
+
+function parseEvent(line: string): RavenRunEvent {
+  let value: unknown;
+  try {
+    value = JSON.parse(line);
+  } catch {
+    throw new Error("The Raven proof stream returned malformed evidence.");
+  }
+
+  if (!value || typeof value !== "object") {
+    throw new Error("The Raven proof stream returned an invalid event.");
+  }
+  const event = value as Partial<RavenRunEvent>;
+  if (
+    !eventTypes.has(event.type as RavenRunEventType) ||
+    typeof event.phase !== "string" ||
+    typeof event.progress !== "number" ||
+    typeof event.message !== "string"
+  ) {
+    throw new Error("The Raven proof stream returned incomplete evidence.");
+  }
+
+  return {
+    ...event,
+    type: event.type as RavenRunEventType,
+    phase: event.phase as RavenRunEvent["phase"],
+    progress: Math.max(0, Math.min(1, event.progress)),
+    message: event.message,
+  };
+}
 
 export async function getAppData() {
   const [healthResponse, scenariosResponse] = await Promise.all([
@@ -17,20 +72,26 @@ export async function getAppData() {
   ]);
 
   if (!healthResponse.ok || !scenariosResponse.ok) {
-    throw new Error("TokenOS compiler is not reachable.");
+    throw new Error("TokenOS memory governor is not reachable.");
   }
 
   const health = (await healthResponse.json()) as {
     ok: boolean;
-    providers: ProviderStatus;
+    providers?: Partial<RavenProviderStatus>;
   };
   const scenarios = (await scenariosResponse.json()) as ScenarioSummary[];
-  return { providers: health.providers, scenarios };
+  const providers: RavenProviderStatus = {
+    everos: providerMode(health.providers?.everos),
+    raven: providerMode(health.providers?.raven),
+    message: health.providers?.message ?? "Raven and EverOS provider modes are reported by the runtime.",
+  };
+
+  return { providers, scenarios };
 }
 
 export async function streamRun(
-  input: RunRequest,
-  onEvent: (event: RunEvent) => void,
+  input: RavenRunRequest,
+  onEvent: (event: RavenRunEvent) => void,
 ) {
   const response = await fetch("/api/run", {
     method: "POST",
@@ -40,27 +101,31 @@ export async function streamRun(
 
   if (!response.ok) {
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(payload?.error ?? `Compiler returned ${response.status}.`);
+    throw new Error(payload?.error ?? `Memory governor returned ${response.status}.`);
   }
+  if (!response.body) throw new Error("The Raven proof stream is unavailable.");
 
-  if (!response.body) throw new Error("The compiler stream is unavailable.");
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
+  let terminal = false;
+
+  const emit = (line: string) => {
+    if (!line.trim()) return;
+    const event = parseEvent(line);
+    if (["run.completed", "compile.refused", "run.error"].includes(event.type)) terminal = true;
+    onEvent(event);
+  };
 
   while (true) {
     const { value, done } = await reader.read();
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
-
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      onEvent(JSON.parse(line) as RunEvent);
-    }
-
+    for (const line of lines) emit(line);
     if (done) break;
   }
 
-  if (buffer.trim()) onEvent(JSON.parse(buffer) as RunEvent);
+  if (buffer.trim()) emit(buffer);
+  if (!terminal) throw new Error("The Raven proof stream ended before a terminal result.");
 }
