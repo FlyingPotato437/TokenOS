@@ -44,11 +44,11 @@ function parseEvent(line: string): RavenRunEvent {
   try {
     value = JSON.parse(line);
   } catch {
-    throw new Error("The Raven proof stream returned malformed evidence.");
+    throw new Error("The TokenOS run returned malformed evidence.");
   }
 
   if (!value || typeof value !== "object") {
-    throw new Error("The Raven proof stream returned an invalid event.");
+    throw new Error("The TokenOS run returned an invalid event.");
   }
   const event = value as Partial<RavenRunEvent>;
   if (
@@ -57,7 +57,7 @@ function parseEvent(line: string): RavenRunEvent {
     typeof event.progress !== "number" ||
     typeof event.message !== "string"
   ) {
-    throw new Error("The Raven proof stream returned incomplete evidence.");
+    throw new Error("The TokenOS run returned incomplete evidence.");
   }
 
   return {
@@ -107,7 +107,11 @@ export async function streamRun(
     const payload = (await response.json().catch(() => null)) as { error?: string } | null;
     throw new Error(payload?.error ?? `Memory governor returned ${response.status}.`);
   }
-  if (!response.body) throw new Error("The Raven proof stream is unavailable.");
+  const contentType = response.headers.get("content-type") ?? "";
+  if (!contentType.includes("application/x-ndjson")) {
+    throw new Error("The TokenOS run endpoint returned an unexpected response. Refresh and run again.");
+  }
+  if (!response.body) throw new Error("The TokenOS run did not return an evidence stream.");
 
   const reader = response.body.getReader();
   const decoder = new TextDecoder();
@@ -131,5 +135,5 @@ export async function streamRun(
   }
 
   if (buffer.trim()) await emit(buffer);
-  if (!terminal) throw new Error("The Raven proof stream ended before a terminal result.");
+  if (!terminal) throw new Error("The TokenOS run ended before the final result. Run it again.");
 }

@@ -74,7 +74,7 @@ test("successful local cases become historical bid signals on the next task", as
   assert.ok(signals.every((signal) => signal.memoryIds.includes("inc-case-1")));
 });
 
-test("the evidence ledger still works in explicitly ephemeral demo mode", async () => {
+test("the evidence ledger still works with explicitly ephemeral storage", async () => {
   process.env.TOKENOS_LEDGER_PATH = ":memory:";
   const result = await persistLocalRun(evidence("memory-run"));
   const signals = await readLearnedMemorySignals("incident");

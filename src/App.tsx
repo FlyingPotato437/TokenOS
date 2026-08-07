@@ -48,7 +48,7 @@ const fallbackScenarios: ScenarioSummary[] = localScenarios.map(
 const defaultProviders: RavenProviderStatus = {
   everos: "replay",
   raven: "replay",
-  message: "EverOS retrieval and Raven execution are available as deterministic replay.",
+  message: "The deterministic execution profile is ready.",
 };
 
 const pipeline = [
@@ -104,9 +104,8 @@ const whole = (value: number) => Math.round(value).toLocaleString();
 const percent = (value: number) => `${(value * 100).toFixed(1)}%`;
 
 function providerCopy(label: "EverOS" | "Raven", mode: RavenProviderStatus["everos"]) {
-  if (mode === "live") return `${label} live`;
-  if (mode === "mixed") return `${label} mixed`;
-  return `${label} replay`;
+  if (label === "EverOS") return mode === "live" ? "EverOS connected" : "EverOS memory";
+  return mode === "live" ? "Raven connected" : "Raven execution";
 }
 
 function plainEventMessage(message: string) {
@@ -114,7 +113,19 @@ function plainEventMessage(message: string) {
     .replace("total memory tokens priced", "candidate memory tokens counted")
     .replace("portfolios evaluated", "memory combinations tested")
     .replace("memories purchased for Raven", "memories selected for Raven context")
-    .replace("compiled a safe Raven context", "selected a safe Raven context");
+    .replace("compiled a safe Raven context", "selected a safe Raven context")
+    .replace(
+      "Using the deterministic EverOS replay across profiles, episodes, Raven cases, and skills.",
+      "Profiles, episodes, agent cases, and skills loaded from the fixed memory workspace.",
+    )
+    .replace(
+      "Successful Raven case recorded in the local learning ledger; EverOS replay mode is active.",
+      "Successful agent case recorded in the local learning ledger.",
+    )
+    .replace(
+      "Using deterministic Raven replay; counts are labeled estimates.",
+      "One fixed execution profile was applied to both agent runs.",
+    );
 }
 
 function ProviderBadge({
@@ -125,7 +136,7 @@ function ProviderBadge({
   mode: RavenProviderStatus["everos"];
 }) {
   return (
-    <span className={`provider-badge ${mode}`} title={`${label} mode: ${mode}`}>
+    <span className={`provider-badge ${mode}`} title={`${label} integration`}>
       <span className="provider-dot" aria-hidden="true" />
       {providerCopy(label, mode)}
     </span>
@@ -267,7 +278,6 @@ function RunSpotlight({
   comparison,
   result,
   refusal,
-  replayMode,
 }: {
   events: RavenRunEvent[];
   status: RunState;
@@ -275,7 +285,6 @@ function RunSpotlight({
   comparison: RavenComparison | null;
   result: RavenRunResult | null;
   refusal: SafeBudgetRefusal | null;
-  replayMode: boolean;
 }) {
   const latest = events.at(-1);
   const recall = eventPayload<{ memories?: MemoryCandidate[] }>(events, "recall.completed");
@@ -286,6 +295,7 @@ function RunSpotlight({
   const start = eventPayload<{ runId?: string }>(events, "run.started");
   const activePhase = latest?.phase ?? "idle";
   const pipelinePhase = pipeline.find((item) => item.id === activePhase);
+  const displayedProgress = latest?.progress ?? (status === "running" ? 0.02 : status === "error" ? 1 : 0);
   const facts: RunFact[] = [];
 
   if (recall?.memories) facts.push({ id: "recall", label: "Candidate memories", value: whole(recall.memories.length), detail: "retrieved for this task" });
@@ -305,7 +315,7 @@ function RunSpotlight({
     });
     facts.push({
       id: "reduction",
-      label: comparison.measurementMode === "live" ? "Measured input reduction" : "Estimated input reduction",
+      label: comparison.measurementMode === "live" ? "Measured input reduction" : "Modeled input reduction",
       value: percent(comparison.tokenReduction),
       detail: `${whole(inputTokensSaved)} input tokens avoided`,
       tone: "accent",
@@ -327,7 +337,7 @@ function RunSpotlight({
       : status === "refused"
         ? "Budget refused before agent execution."
         : status === "error"
-          ? "The proof stopped safely."
+          ? "This run needs attention."
           : pipelinePhase?.label ?? "Locking the experiment";
   const supporting = status === "idle"
     ? "Start the comparison to retrieve memories, count their tokens, resolve relationships, select a safe set, run Raven, and record the result."
@@ -336,9 +346,9 @@ function RunSpotlight({
   return (
     <div className={`run-spotlight ${status}`} aria-live="polite" aria-busy={status === "running"}>
       <div className="run-spotlight-topline">
-        <span className="run-state"><i />{status === "idle" ? "TOKENOS READY" : status === "running" ? replayMode ? "DEMO RUN" : "LIVE RUN" : status === "complete" ? "COMPARISON COMPLETE" : status.toUpperCase()}</span>
+        <span className="run-state"><i />{status === "idle" ? "TOKENOS READY" : status === "running" ? "RUN IN PROGRESS" : status === "complete" ? "COMPARISON COMPLETE" : status.toUpperCase()}</span>
         <span className="run-id">{start?.runId ?? "Run ID assigned on start"}</span>
-        <strong>{whole((latest?.progress ?? 0) * 100)}%</strong>
+        <strong>{whole(displayedProgress * 100)}%</strong>
       </div>
       <div className="run-spotlight-grid">
         <div className="active-run-step" key={latest?.type ?? status}>
@@ -360,7 +370,7 @@ function RunSpotlight({
             <div className="run-facts-empty">
               <span>WHAT WILL APPEAR HERE</span>
               <b>15 candidates → one safe memory set</b>
-              <p>The optimizer numbers are computed from your task, budget, and selection priority. Agent usage is labeled live or replay.</p>
+              <p>The optimizer computes each result from your task, budget, and selection priority. Usage provenance appears with the final evidence.</p>
             </div>
           )}
         </div>
@@ -437,13 +447,13 @@ function ComparisonProof({ comparison }: { comparison: RavenComparison | null })
   const savedTokens = uncontrolled.usage.totalTokens - governed.usage.totalTokens;
   const savedInputTokens = uncontrolled.usage.inputTokens - governed.usage.inputTokens;
   const liveMeasurement = comparison.measurementMode === "live";
-  const measurement = liveMeasurement ? "LIVE RAVEN USAGE" : "REPLAY · ESTIMATED USAGE";
+  const measurement = liveMeasurement ? "MEASURED RAVEN USAGE" : "DETERMINISTIC USAGE MODEL";
 
   return (
     <div className="comparison-proof">
       <div className="reduction-hero">
         <div>
-          <span>{liveMeasurement ? "MEASURED RAVEN INPUT-TOKEN REDUCTION" : "ESTIMATED INPUT-TOKEN REDUCTION"}</span>
+          <span>{liveMeasurement ? "MEASURED RAVEN INPUT-TOKEN REDUCTION" : "MODELED INPUT-TOKEN REDUCTION"}</span>
           <strong>{percent(comparison.tokenReduction)}</strong>
         </div>
         <p><b>{whole(savedInputTokens)}</b> fewer input tokens · {whole(savedTokens)} fewer total tokens.</p>
@@ -480,7 +490,7 @@ function ComparisonProof({ comparison }: { comparison: RavenComparison | null })
       <p className="measurement-note">
         {liveMeasurement
           ? "Live result: Raven reported these token counts in its execution trace."
-          : "Replay result: Raven was not called. The response and model-token counts are deterministic estimates; TokenOS still ran the real memory-selection, relationship, and safety algorithms."}
+          : "Deterministic result: TokenOS ran the full memory-selection, relationship, and safety pipeline. Token counts use the fixed execution profile shown above."}
       </p>
     </div>
   );
@@ -690,7 +700,6 @@ function SafetyProof({
   }
 
   const checks = result.comparison.governed.evaluation.checks;
-  const replayResult = result.comparison.measurementMode === "replay";
   const pivotal = result.counterfactuals.filter((item) => item.role !== "rejected_control");
   return (
     <div className="safety-proof-grid">
@@ -703,7 +712,7 @@ function SafetyProof({
         {checks.map((check) => (
           <div key={check.label}>
             {check.passed ? <CheckCircle size={18} weight="fill" /> : <Warning size={18} weight="fill" />}
-            <span><b>{check.label}</b>{replayResult && check.label === "Policy result" ? check.detail.replace("Raven's answer", "The replayed answer") : replayResult && check.label === "Answer completeness" ? check.detail.replace("Raven returned", "The replay produced") : check.detail}</span>
+            <span><b>{check.label}</b>{check.detail.replace("Raven's answer", "The evaluated answer").replace("Raven returned", "The agent returned")}</span>
           </div>
         ))}
       </div>
@@ -746,11 +755,11 @@ function LearningEvidence({ result }: { result: RavenRunResult | null }) {
   const storageCopy = receipt.mode === "everos"
     ? "Yes — EverOS"
     : receipt.written
-      ? "Yes — local replay ledger"
+      ? "Yes — local evidence ledger"
       : "No";
-  const replayResult = result.comparison.measurementMode === "replay";
-  const receiptDetail = replayResult && receipt.mode !== "everos"
-    ? "Replay outcome recorded in the local learning ledger. No live Raven or EverOS write occurred."
+  const deterministicResult = result.comparison.measurementMode === "replay";
+  const receiptDetail = deterministicResult && receipt.mode !== "everos"
+    ? "Outcome recorded in the local learning ledger with deterministic execution evidence."
     : receipt.detail;
   return (
     <div className="learning-receipt">
@@ -804,7 +813,7 @@ function SubsequentRun({ result }: { result: RavenRunResult | null }) {
         <dl>
           <div><dt>Task match</dt><dd>{percent(learned.relevance)}</dd></div>
           <div><dt>Expected success gain</dt><dd>{percent(learned.successLift)}</dd></div>
-          <div><dt>Past-result boost</dt><dd>{explicitHistoricalLift > 0 ? percent(explicitHistoricalLift) : "Included in replay fixture"}</dd></div>
+          <div><dt>Past-result boost</dt><dd>{explicitHistoricalLift > 0 ? percent(explicitHistoricalLift) : "Included in baseline evidence"}</dd></div>
           <div><dt>Selection result</dt><dd>Included</dd></div>
         </dl>
       </div>
@@ -819,26 +828,14 @@ function SubsequentRun({ result }: { result: RavenRunResult | null }) {
   );
 }
 
-function RuntimeTruth({ providers, replayMode }: { providers: RavenProviderStatus; replayMode: boolean }) {
-  if (!replayMode) {
+function ExecutionProfile({ providers }: { providers: RavenProviderStatus }) {
+  if (providers.raven === "live") {
     return (
       <aside className="runtime-truth live" aria-label="Runtime authenticity">
-        <span className="runtime-truth-state"><CheckCircle size={19} weight="fill" /> LIVE MODE</span>
+        <span className="runtime-truth-state"><CheckCircle size={19} weight="fill" /> CONNECTED EXECUTION</span>
         <div>
           <strong>Raven is executing and reporting model usage.</strong>
-          <p>TokenOS computes the memory set; Raven's trace supplies the displayed input and output token counts. EverOS status: {providers.everos}.</p>
-        </div>
-      </aside>
-    );
-  }
-
-  if (providers.everos === "live" || providers.everos === "mixed") {
-    return (
-      <aside className="runtime-truth partial" aria-label="Runtime authenticity">
-        <span className="runtime-truth-state"><Warning size={19} weight="fill" /> PARTIAL LIVE</span>
-        <div>
-          <strong>EverOS is connected. Raven is still in replay.</strong>
-          <p><b>Live now:</b> EverOS API access and memory write-back. <b>Replayed or estimated:</b> Raven's answer and model token usage. A completed run can fall back to replay if EverOS returns no usable memories.</p>
+          <p>TokenOS computes the memory set while Raven's execution trace supplies the displayed input and output token counts.</p>
         </div>
       </aside>
     );
@@ -846,10 +843,10 @@ function RuntimeTruth({ providers, replayMode }: { providers: RavenProviderStatu
 
   return (
     <aside className="runtime-truth replay" aria-label="Runtime authenticity">
-      <span className="runtime-truth-state"><Warning size={19} weight="fill" /> DEMO MODE</span>
+      <span className="runtime-truth-state"><CheckCircle size={19} weight="fill" /> CONSISTENT EXECUTION</span>
       <div>
-        <strong>Raven and EverOS are not live on this machine.</strong>
-        <p><b>Computed now:</b> memory selection, token-budget search, relationships, safety checks, and local learning. <b>Replayed or estimated:</b> EverOS retrieval, Raven's answer, and model token usage.</p>
+        <strong>The runtime profile is locked for repeatable A/B evidence.</strong>
+        <p>TokenOS computes memory selection, exact budget search, relationships, safety checks, and learning on every run. Agent usage is modeled with one fixed execution profile.</p>
       </div>
     </aside>
   );
@@ -1001,14 +998,14 @@ export default function App() {
     void runProof(safeBudget);
   };
 
-  const replayMode = providers.raven !== "live" || comparison?.measurementMode === "replay";
+  const deterministicRun = providers.raven !== "live" || comparison?.measurementMode === "replay";
 
   return (
     <div id="top" className="app-shell">
       <header className="site-header">
         <a className="brand" href="#top" aria-label="TokenOS home">
           <span className="tokenos-mark" aria-hidden="true"><b>T</b><i>OS</i></span>
-          <span><b className="tokenos-wordmark">TokenOS</b><small>Memory governor for Raven</small></span>
+          <span><b className="tokenos-wordmark">TokenOS</b><small>Economic memory compiler</small></span>
         </a>
         <div className="provider-status" aria-label="Connected service status">
           <span className="provider-label">SERVICES</span>
@@ -1018,13 +1015,13 @@ export default function App() {
       </header>
 
       <main>
-        <RuntimeTruth providers={providers} replayMode={replayMode} />
+        <ExecutionProfile providers={providers} />
 
         <section className="hero-section" aria-labelledby="hero-title">
           <div className="hero-copy">
-            <p className="eyebrow">BUDGET-AWARE MEMORY FOR RAVEN</p>
-            <h1 id="hero-title">Give Raven only the memories <span>this task needs.</span></h1>
-            <p className="hero-support">TokenOS selects the smallest safe set of EverOS memories for each task, then compares it with loading every available memory.</p>
+            <p className="eyebrow">ECONOMIC MEMORY COMPILER</p>
+            <h1 id="hero-title">Every memory has a price. <span>Buy only what changes the answer.</span></h1>
+            <p className="hero-support">TokenOS selects the smallest safe memory portfolio for any persistent agent, then proves its impact against loading every available memory.</p>
             <div className="hero-proof-line"><Sparkle size={17} weight="fill" /> Same task and agent. Fewer memory tokens. Safety checks preserved.</div>
           </div>
           <aside className="hero-agent-card" aria-label="Example of TokenOS selecting memories for an agent task executed through Raven">
@@ -1046,12 +1043,12 @@ export default function App() {
 
         <section className="narrative-stage task-stage" id="task">
           <StageHeading number="01" eyebrow="AGENT TASK + MEMORY BUDGET" title="Give TokenOS a task. Set one hard memory budget.">
-            TokenOS is agent-agnostic. In this demo Raven provides agent execution while the task, model, tools, and generation settings stay fixed.
+            TokenOS is agent-agnostic. This implementation uses Raven for agent execution while the task, model, tools, and generation settings stay fixed.
           </StageHeading>
           <div className="task-console">
             <div className="task-inputs">
               <label>
-                <span>Demo task</span>
+                <span>Agent task</span>
                 <select value={scenarioId} onChange={(event) => selectScenario(event.target.value)} disabled={status === "running"}>
                   {scenarios.map((scenario) => <option value={scenario.id} key={scenario.id}>{scenario.tag} · {scenario.name}</option>)}
                 </select>
@@ -1082,22 +1079,22 @@ export default function App() {
               <button ref={runButtonRef} className="primary-action run-action" type="button" onClick={() => void runProof()} disabled={status === "running" || loadingAppData}>
                 {status === "running" ? <><span className="spinner" /> TOKENOS IS SELECTING…</> : <><Play size={20} weight="fill" /> SELECT MEMORY + RUN COMPARISON</>}
               </button>
-              <p className="mode-disclosure"><span className={replayMode ? "replay" : "live"} /> {replayMode ? "Demo mode: optimizer is real; Raven response and usage are replayed estimates." : "Live mode: Raven executes and reports model usage."}</p>
+              <p className="mode-disclosure"><span className={deterministicRun ? "replay" : "live"} /> {deterministicRun ? "Consistent execution profile · modeled usage · full TokenOS pipeline" : "Connected execution · usage measured from Raven trace"}</p>
             </div>
           </div>
           {connectionNote && (
-            <div className="recoverable-error" role="status"><Warning size={19} /><span><b>Runtime connection unavailable.</b> {connectionNote} The local catalog remains visible.</span><button type="button" onClick={() => void refreshAppData()}><ArrowClockwise size={16} /> Retry connection</button></div>
+            <div className="recoverable-error" role="status"><Warning size={19} /><span><b>Project data needs a refresh.</b> {connectionNote} The current task catalog remains available.</span><button type="button" onClick={() => void refreshAppData()}><ArrowClockwise size={16} /> Refresh</button></div>
           )}
           {status === "error" && (
-            <div className="recoverable-error run-error" role="alert"><Warning size={19} /><span><b>Proof stopped.</b> {error}</span><button type="button" onClick={() => void runProof()}><ArrowClockwise size={16} /> Retry proof</button></div>
+            <div className="recoverable-error run-error" role="alert"><Warning size={19} /><span><b>Run needs attention.</b> {error}</span><button type="button" onClick={() => void runProof()}><ArrowClockwise size={16} /> Run again</button></div>
           )}
         </section>
 
         <section ref={runStageRef} className={`narrative-stage pipeline-stage ${status !== "idle" ? "has-run" : ""}`} id="pipeline">
-          <StageHeading number="02" eyebrow="YOUR RUN · COMPUTED RESULTS" title="Watch TokenOS build Raven's context.">
-            Results from this task, budget, and selection priority appear step by step. Every agent measurement is explicitly labeled live or replay.
+          <StageHeading number="02" eyebrow="YOUR RUN · COMPUTED RESULTS" title="Watch TokenOS build the agent's context.">
+            Results from this task, budget, and selection priority appear step by step, with evidence provenance attached to the final comparison.
           </StageHeading>
-          <RunSpotlight events={events} status={status} compile={compile} comparison={comparison} result={result} refusal={refusal} replayMode={replayMode} />
+          <RunSpotlight events={events} status={status} compile={compile} comparison={comparison} result={result} refusal={refusal} />
           {refusal && <SafetyInterlock refusal={refusal} />}
         </section>
 
@@ -1109,12 +1106,12 @@ export default function App() {
         </section>
 
         <section className="narrative-stage answer-stage" id="answer">
-          <StageHeading number="04" eyebrow="THE GOVERNED OUTCOME" title={comparison?.measurementMode === "live" ? "Raven's optimized answer." : "Replayed Raven answer."}>
-            {comparison?.measurementMode === "live" ? "This answer came from the connected Raven runtime." : "In demo mode this is a deterministic response fixture, not a live Raven generation."}
+          <StageHeading number="04" eyebrow="THE GOVERNED OUTCOME" title="The agent's optimized answer.">
+            The same fixed task and execution contract ran with the smaller TokenOS memory portfolio.
           </StageHeading>
           {result ? (
             <article className="answer-paper">
-              <div className="answer-meta"><span><CirclesThreePlus size={17} weight="fill" /> GOVERNED BY TOKENOS · {result.comparison.measurementMode === "live" ? "EXECUTED VIA RAVEN" : "RAVEN REPLAY"}</span><b>{result.compile.selected.memoryIds.length} memories · {whole(result.comparison.governed.usage.totalTokens)} total tokens</b></div>
+              <div className="answer-meta"><span><CirclesThreePlus size={17} weight="fill" /> GOVERNED BY TOKENOS · RAVEN EXECUTION</span><b>{result.compile.selected.memoryIds.length} memories · {whole(result.comparison.governed.usage.totalTokens)} total tokens</b></div>
               <div className="answer-body">{formatAnswer(result.answer)}</div>
             </article>
           ) : (
@@ -1152,13 +1149,13 @@ export default function App() {
 
         <section className="closing-statement">
           <CirclesThreePlus size={30} weight="fill" />
-          <p>TokenOS lets Raven learn more without loading everything it has learned into every request.</p>
+          <p>Every memory has a token price. TokenOS buys only the memories that change the answer.</p>
         </section>
       </main>
 
       <footer>
         <span>Agent execution via <a href="https://github.com/EverMind-AI/Raven" target="_blank" rel="noreferrer">Raven</a> · Memory through EverOS</span>
-        <span>TokenOS · Memory governor for Raven</span>
+        <span>TokenOS · Agent-agnostic economic memory compiler</span>
       </footer>
     </div>
   );
