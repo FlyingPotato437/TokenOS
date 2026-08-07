@@ -6,7 +6,7 @@ Use the production-incident scenario. Before presenting, confirm the provider ch
 
 **Show:** The objective and the 15-memory recall count.
 
-**Say:** “Raven gets more useful as EverOS memory accumulates, but every remembered episode, policy, and case can be sent back through the model again. Traditional retrieval optimizes for relevance. TokenOS asks a harder economic question: which memories are worth paying for on this decision, without removing anything required for safety?”
+**Say:** “Persistent agents get more useful as memory accumulates, but every remembered episode, policy, and case can be sent back through the model again. Traditional retrieval optimizes for relevance. TokenOS asks a harder economic question: which memories are worth paying for on this decision, without removing anything required for safety? This demo uses EverOS for memory and Raven as the agent execution service.”
 
 ## 0:25–0:50 — Run uncontrolled Raven
 

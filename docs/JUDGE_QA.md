@@ -26,7 +26,7 @@ EverOS supplies persistent user memories and Raven agent cases instead of a stat
 
 ## Why Raven?
 
-Raven is the execution harness whose growing memory creates the economic problem. TokenOS governs which EverOS memories reach that harness. The live adapter invokes Raven directly and accepts measured token usage only from Raven telemetry; deterministic replay keeps the same contract testable without external credentials.
+TokenOS is agent-agnostic; Raven is the agent execution service implemented for this hackathon build. TokenOS governs which EverOS memories reach that service. The live adapter invokes Raven directly and accepts measured token usage only from Raven telemetry; deterministic replay keeps the same contract testable without external credentials. Supporting another agent runtime would require an adapter that preserves the same fixed-contract and usage-reporting guarantees, not a rewrite of the compiler.
 
 ## Why must both runs use the same Raven contract?
 

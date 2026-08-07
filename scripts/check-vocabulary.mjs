@@ -33,5 +33,5 @@ if (offenders.length) {
   console.error(`Retired product references remain in: ${offenders.join(", ")}`);
   process.exitCode = 1;
 } else {
-  console.log("Active product vocabulary is Raven-only.");
+  console.log("Retired integration vocabulary check passed. TokenOS is the product; Raven is the agent service.");
 }

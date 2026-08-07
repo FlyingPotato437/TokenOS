@@ -1,6 +1,6 @@
 # TokenOS
 
-**TokenOS is an Economic Memory Compiler.** It gives Raven the cheapest safe memory portfolio that preserves the right decision, then proves which memories earned their token cost.
+**TokenOS is an Economic Memory Compiler for persistent agents.** It finds the cheapest safe memory portfolio that preserves the right decision, then proves which memories earned their token cost. The compiler is agent-agnostic; this hackathon implementation uses Raven as the agent execution service and EverOS as the memory provider.
 
 > Every memory has a token price.
 
@@ -8,7 +8,9 @@ Persistent agents become more expensive as their memory grows. Similarity search
 
 > What is the cheapest safe combination of memories that still produces the right outcome?
 
-TokenOS retrieves candidate memory from EverOS, pins non-negotiable policy, prices each memory's marginal value, evaluates the relationship graph, and searches for the best feasible portfolio under an exact token budget. It then runs an uncontrolled all-memory baseline and a governed purchased-memory variant through the same Raven execution contract. The result is evidence, not a claim: token counts, preserved facts and policy, causal ablations, a local run ledger, and an EverOS agent-case learning receipt.
+TokenOS retrieves candidate memory from EverOS, pins non-negotiable policy, prices each memory's marginal value, evaluates the relationship graph, and searches for the best feasible portfolio under an exact token budget. It then sends an uncontrolled all-memory baseline and a governed purchased-memory variant to the same agent execution service. In this repository that service is Raven. The result is evidence, not a claim: token counts, preserved facts and policy, causal ablations, a local run ledger, and an agent-case learning receipt.
+
+TokenOS does not depend on Raven-specific ranking logic. Recall, pricing, graph analysis, safety constraints, portfolio compilation, evaluation, and evidence persistence are TokenOS concerns. Raven is the implemented execution adapter used to run the controlled agent A/B and report usage; another agent runtime would need its own adapter implementing the same fixed execution and usage contract.
 
 ## Why this is not ordinary RAG
 
@@ -18,7 +20,7 @@ TokenOS retrieves candidate memory from EverOS, pins non-negotiable policy, pric
 | Selection | Usually independent top-k items | A constrained memory portfolio |
 | Relationships | Often ignored after ranking | Duplicate, contradiction, dependency, and complement edges affect the portfolio |
 | Safety | A relevant policy can lose the ranking contest | Critical policy is pinned and budgets below the safe floor are refused |
-| Proof | Retrieval score | Controlled Raven A/B, evaluator checks, and counterfactual ablations |
+| Proof | Retrieval score | Controlled agent A/B through Raven, evaluator checks, and counterfactual ablations |
 | Feedback | Store another conversation | Write an agent case and apply its historical outcome lift on a related run |
 
 Top-k embeddings can return five versions of the same fact, a stale runbook, or a contradiction. TokenOS reasons about the set: whether a memory adds missing coverage, depends on another memory, complements evidence already purchased, or is redundant once a stronger source is present.
@@ -27,11 +29,12 @@ Top-k embeddings can return five versions of the same fact, a stale runbook, or 
 
 ```mermaid
 flowchart LR
+    A["Any persistent agent task"] --> T
     E1["EverOS<br/>user memory + agent cases"] --> T["TokenOS<br/>price · connect · compile"]
     T --> P["Pinned policy<br/>+ purchased portfolio"]
     T --> B["Uncontrolled baseline<br/>all recalled memories"]
-    P --> R["Raven<br/>governed execution"]
-    B --> R2["Raven<br/>uncontrolled execution"]
+    P --> R["Raven agent service<br/>governed execution"]
+    B --> R2["Raven agent service<br/>uncontrolled execution"]
     R --> V["Evaluator<br/>facts · policy · ablations"]
     R2 --> V
     V --> L["Local JSONL<br/>evidence ledger"]
@@ -39,7 +42,7 @@ flowchart LR
     E2 -. "related future recall" .-> E1
 ```
 
-The two Raven paths hold runtime, model, task fingerprint, tools, temperature, and output limit constant. Only the memory context changes:
+The two agent-execution paths use the same Raven service and hold runtime, model, task fingerprint, tools, temperature, and output limit constant. Only the memory context changes:
 
 - The **uncontrolled** run receives every recalled memory.
 - The **governed** run receives only pinned and purchased memories.

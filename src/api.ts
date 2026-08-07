@@ -95,7 +95,7 @@ export async function getAppData() {
 
 export async function streamRun(
   input: RavenRunRequest,
-  onEvent: (event: RavenRunEvent) => void,
+  onEvent: (event: RavenRunEvent) => void | Promise<void>,
 ) {
   const response = await fetch("/api/run", {
     method: "POST",
@@ -114,11 +114,11 @@ export async function streamRun(
   let buffer = "";
   let terminal = false;
 
-  const emit = (line: string) => {
+  const emit = async (line: string) => {
     if (!line.trim()) return;
     const event = parseEvent(line);
     if (["run.completed", "compile.refused", "run.error"].includes(event.type)) terminal = true;
-    onEvent(event);
+    await onEvent(event);
   };
 
   while (true) {
@@ -126,10 +126,10 @@ export async function streamRun(
     buffer += decoder.decode(value ?? new Uint8Array(), { stream: !done });
     const lines = buffer.split("\n");
     buffer = lines.pop() ?? "";
-    for (const line of lines) emit(line);
+    for (const line of lines) await emit(line);
     if (done) break;
   }
 
-  if (buffer.trim()) emit(buffer);
+  if (buffer.trim()) await emit(buffer);
   if (!terminal) throw new Error("The Raven proof stream ended before a terminal result.");
 }
