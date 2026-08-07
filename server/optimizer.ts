@@ -1,18 +1,16 @@
-import { modelCatalog } from "../shared/catalog.ts";
 import type {
   CompileResult,
   CounterfactualPlan,
   MemoryCandidate,
   MemoryRelationship,
-  ModelOption,
   PlanCandidate,
-  RunConstraints,
   Scenario,
-  ToolOption,
 } from "../shared/contracts.ts";
+import type { MemoryGovernorConstraints } from "../shared/raven-contract.ts";
 
-const AI_CREDIT_USD = 2;
-const PROMPT_OVERHEAD_TOKENS = 420;
+const PROMPT_OVERHEAD_TOKENS = 320;
+const RAVEN_MODEL_ID = "raven-configured-model";
+const RAVEN_MODEL_NAME = "Raven Agent";
 
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
@@ -20,183 +18,217 @@ const clamp = (value: number, min: number, max: number) =>
 const estimateTokens = (text: string) => Math.max(1, Math.ceil(text.length / 4));
 
 function powerSet<T>(items: T[]): T[][] {
+  if (items.length > 20) {
+    throw new Error("Exact memory compilation is limited to 20 candidates per run.");
+  }
   const sets: T[][] = [];
-  const combinations = 1 << items.length;
-
+  const combinations = 2 ** items.length;
   for (let mask = 0; mask < combinations; mask += 1) {
     const selection: T[] = [];
     for (let index = 0; index < items.length; index += 1) {
-      if (mask & (1 << index)) selection.push(items[index]);
+      if (mask & (2 ** index)) selection.push(items[index]);
     }
     sets.push(selection);
   }
-
   return sets;
 }
 
-function flattenRelationships(memories: MemoryCandidate[]): MemoryRelationship[] {
-  return memories.flatMap((memory) =>
-    (memory.relationships ?? []).map((relationship) => ({
-      sourceId: memory.id,
-      ...relationship,
-    })),
+function terms(text: string) {
+  return new Set(
+    text
+      .toLowerCase()
+      .replace(/[^a-z0-9\s]/g, " ")
+      .split(/\s+/)
+      .filter((word) => word.length >= 4),
   );
 }
 
-function candidateScore(
+function overlap(left: Set<string>, right: Set<string>) {
+  const shared = [...left].filter((term) => right.has(term)).length;
+  const union = new Set([...left, ...right]).size;
+  return union ? shared / union : 0;
+}
+
+function hasNegativePolicy(text: string) {
+  return /\b(no|never|avoid|must not|do not|without (?:explicit )?approval)\b/i.test(text);
+}
+
+function sharesControlledAction(left: string, right: string) {
+  const actions = ["restart", "freeze", "delete", "migrate", "replay", "deploy", "rollback"];
+  return actions.some((action) => left.toLowerCase().includes(action) && right.toLowerCase().includes(action));
+}
+
+function edgeKey(edge: MemoryRelationship) {
+  return `${edge.sourceId}|${edge.targetId}|${edge.type}`;
+}
+
+export function connectMemoryGraph(memories: MemoryCandidate[]): MemoryRelationship[] {
+  const edges = memories.flatMap((memory) =>
+    (memory.relationships ?? []).map((relationship) => ({ sourceId: memory.id, ...relationship })),
+  );
+  const known = new Set(edges.map(edgeKey));
+  const termSets = new Map(memories.map((memory) => [memory.id, terms(memory.content)]));
+
+  for (let leftIndex = 0; leftIndex < memories.length; leftIndex += 1) {
+    for (let rightIndex = leftIndex + 1; rightIndex < memories.length; rightIndex += 1) {
+      const left = memories[leftIndex];
+      const right = memories[rightIndex];
+      const similarity = overlap(termSets.get(left.id)!, termSets.get(right.id)!);
+      let inferred: MemoryRelationship | undefined;
+      if (
+        sharesControlledAction(left.content, right.content) &&
+        hasNegativePolicy(left.content) !== hasNegativePolicy(right.content) &&
+        similarity >= 0.08
+      ) {
+        inferred = {
+          sourceId: left.id,
+          targetId: right.id,
+          type: "contradicts",
+          strength: clamp(0.72 + similarity, 0.72, 0.98),
+        };
+      } else if (similarity >= 0.47) {
+        inferred = {
+          sourceId: left.id,
+          targetId: right.id,
+          type: "duplicate",
+          strength: clamp(similarity + 0.28, 0.7, 0.98),
+        };
+      } else if (similarity >= 0.24 && left.type !== right.type) {
+        inferred = {
+          sourceId: left.id,
+          targetId: right.id,
+          type: "complements",
+          strength: clamp(similarity + 0.35, 0.58, 0.9),
+        };
+      }
+      if (inferred && !known.has(edgeKey(inferred))) {
+        known.add(edgeKey(inferred));
+        edges.push(inferred);
+      }
+    }
+  }
+  return edges;
+}
+
+function portfolioScore(
   successProbability: number,
-  cost: number,
   memoryTokens: number,
-  constraints: RunConstraints,
+  selectedCount: number,
+  historicalLift: number,
+  constraints: MemoryGovernorConstraints,
 ) {
-  const costHeadroom = clamp(1 - cost / constraints.maxCost, 0, 1);
-  const tokenHeadroom = clamp(1 - memoryTokens / constraints.maxMemoryTokens, 0, 1);
-
+  const tokenShare = memoryTokens / Math.max(1, constraints.maxMemoryTokens);
   if (constraints.strategy === "economy") {
-    return successProbability * 0.42 + tokenHeadroom * 0.38 + costHeadroom * 0.2;
+    return successProbability * 0.56 - tokenShare * 0.34 - selectedCount * 0.003 + historicalLift * 0.08;
   }
-
   if (constraints.strategy === "quality") {
-    return successProbability * 0.91 + tokenHeadroom * 0.06 + costHeadroom * 0.03;
+    return successProbability * 0.98 - tokenShare * 0.012 - selectedCount * 0.0003 + historicalLift * 0.12;
   }
-
-  return successProbability * 0.7 + tokenHeadroom * 0.2 + costHeadroom * 0.1;
+  return successProbability * 0.82 - tokenShare * 0.1 - selectedCount * 0.0008 + historicalLift * 0.1;
 }
 
 function buildCandidate(
-  model: ModelOption,
   memories: MemoryCandidate[],
-  fixedTools: ToolOption[],
+  allMemories: MemoryCandidate[],
   relationships: MemoryRelationship[],
+  scenario: Scenario,
   objective: string,
-  constraints: RunConstraints,
-  requiredFacts: string[],
-  criticalMemoryIds: Set<string>,
+  constraints: MemoryGovernorConstraints,
   id: string,
 ): PlanCandidate {
   const selectedIds = new Set(memories.map((memory) => memory.id));
+  const criticalIds = new Set(allMemories.filter((memory) => memory.policyCritical).map((memory) => memory.id));
   const memoryTokens = memories.reduce((sum, memory) => sum + memory.tokens, 0);
-  const inputTokens =
-    PROMPT_OVERHEAD_TOKENS + estimateTokens(objective) + memoryTokens + fixedTools.length * 34;
-  const outputTokens = model.expectedOutputTokens;
-  const estimatedCost =
-    ((inputTokens * model.inputCreditsPerMillion +
-      outputTokens * model.outputCreditsPerMillion) /
-      1_000_000) *
-    AI_CREDIT_USD;
-
-  const coveredFacts = [
-    ...new Set(memories.flatMap((memory) => memory.requiredFacts ?? [])),
-  ];
-  const weightedMemoryLift = memories.reduce(
-    (sum, memory) =>
-      sum +
-      memory.successLift *
+  const coveredFacts = [...new Set(memories.flatMap((memory) => memory.requiredFacts ?? []))];
+  const historicalLift = memories.reduce((sum, memory) => sum + (memory.historicalOutcomeLift ?? 0), 0);
+  const weightedLift = memories.reduce((sum, memory) => {
+    const recencyWeight = 0.62 + (memory.recency ?? 0.72) * 0.38;
+    return sum +
+      (memory.successLift + (memory.historicalOutcomeLift ?? 0)) *
         memory.relevance *
         memory.confidence *
-        (0.65 + (memory.recency ?? 0.7) * 0.35),
-    0,
-  );
-
+        recencyWeight;
+  }, 0);
+  const distractionPenalty = memories.reduce((sum, memory) => {
+    const irrelevance = Math.max(0, 0.42 - memory.relevance) * 0.014;
+    const staleness = Math.max(0, 0.3 - (memory.recency ?? 0.7)) * 0.012;
+    return sum + irrelevance + staleness;
+  }, 0);
   let redundancyPenalty = 0;
   let relationshipLift = 0;
   const missingDependencies: string[] = [];
+  const criticalContradictions: string[] = [];
 
   for (const edge of relationships) {
     const sourceSelected = selectedIds.has(edge.sourceId);
     const targetSelected = selectedIds.has(edge.targetId);
-    if (!sourceSelected) continue;
-
-    if (edge.type === "duplicate" && targetSelected) redundancyPenalty += 0.018 * edge.strength;
-    if (edge.type === "contradicts" && targetSelected) redundancyPenalty += 0.055 * edge.strength;
-    if (edge.type === "complements" && targetSelected) relationshipLift += 0.009 * edge.strength;
-    if (edge.type === "depends_on" && !targetSelected) missingDependencies.push(edge.targetId);
+    if (sourceSelected && targetSelected && edge.type === "duplicate") {
+      redundancyPenalty += 0.022 * edge.strength;
+    }
+    if (sourceSelected && targetSelected && edge.type === "contradicts") {
+      redundancyPenalty += 0.075 * edge.strength;
+      if (criticalIds.has(edge.sourceId) || criticalIds.has(edge.targetId)) {
+        criticalContradictions.push(`${edge.sourceId}:${edge.targetId}`);
+      }
+    }
+    if (sourceSelected && targetSelected && edge.type === "complements") {
+      relationshipLift += 0.012 * edge.strength;
+    }
+    if (sourceSelected && !targetSelected && edge.type === "depends_on") {
+      missingDependencies.push(edge.targetId);
+    }
   }
 
-  const toolLift = fixedTools.reduce((sum, tool) => sum + tool.successLift, 0);
-  const memoryGain = (1 - Math.exp(-weightedMemoryLift * 1.55)) * 0.13;
-  const fixedToolGain = (1 - Math.exp(-toolLift * 4)) * 0.035;
   const successProbability = clamp(
-    model.reliability + memoryGain + fixedToolGain + relationshipLift - redundancyPenalty,
+    0.78 +
+      (1 - Math.exp(-weightedLift * 1.7)) * 0.19 +
+      relationshipLift -
+      redundancyPenalty -
+      distractionPenalty,
     0.05,
-    0.985,
+    0.99,
   );
-  const latencyMs =
-    model.latencyMs +
-    (fixedTools.length ? Math.max(...fixedTools.map((tool) => tool.latencyMs)) : 0) +
-    memories.length * 6;
-
   const blockers: string[] = [];
-  const missingCritical = [...criticalMemoryIds].filter((id) => !selectedIds.has(id));
-  const missingFacts = requiredFacts.filter((fact) => !coveredFacts.includes(fact));
-
-  if (estimatedCost > constraints.maxCost) blockers.push("cost ceiling");
+  const missingCritical = [...criticalIds].filter((memoryId) => !selectedIds.has(memoryId));
+  const missingFacts = (scenario.requiredFacts ?? []).filter((fact) => !coveredFacts.includes(fact));
   if (memoryTokens > constraints.maxMemoryTokens) blockers.push("memory token budget");
-  if (latencyMs > constraints.maxLatencyMs) blockers.push("latency SLA");
   if (successProbability < constraints.minSuccess) blockers.push("quality floor");
-  if (!model.regions.includes(constraints.region)) blockers.push("region policy");
   if (missingCritical.length) blockers.push("memory policy");
   if (missingFacts.length) blockers.push("required fact coverage");
   if (missingDependencies.length) blockers.push("memory dependency");
+  if (criticalContradictions.length) blockers.push("policy contradiction");
 
   return {
     id,
-    modelId: model.id,
-    modelName: model.shortName,
+    modelId: RAVEN_MODEL_ID,
+    modelName: RAVEN_MODEL_NAME,
     memoryIds: memories.map((memory) => memory.id),
-    toolIds: fixedTools.map((tool) => tool.id),
-    estimatedCost,
+    toolIds: scenario.tools.map((tool) => tool.id),
+    estimatedCost: 0,
     successProbability,
-    latencyMs,
-    inputTokens,
-    outputTokens,
+    latencyMs: 0,
+    inputTokens: PROMPT_OVERHEAD_TOKENS + estimateTokens(objective) + memoryTokens,
+    outputTokens: 0,
     memoryTokens,
     coveredFacts,
     redundancyPenalty,
-    score: candidateScore(successProbability, estimatedCost, memoryTokens, constraints),
+    score: portfolioScore(successProbability, memoryTokens, memories.length, historicalLift, constraints),
     feasible: blockers.length === 0,
     blockers,
   };
 }
 
 function paretoFrontier(candidates: PlanCandidate[]) {
-  const sorted = [...candidates].sort(
-    (a, b) => a.estimatedCost - b.estimatedCost || b.successProbability - a.successProbability,
-  );
-  const frontier: PlanCandidate[] = [];
-
-  for (const candidate of sorted) {
-    const dominated = frontier.some(
-      (other) =>
-        other.successProbability >= candidate.successProbability &&
-        other.latencyMs <= candidate.latencyMs &&
-        other.memoryTokens <= candidate.memoryTokens,
-    );
-    if (dominated) continue;
-
-    for (let index = frontier.length - 1; index >= 0; index -= 1) {
-      const other = frontier[index];
-      if (
-        candidate.successProbability >= other.successProbability &&
-        candidate.latencyMs <= other.latencyMs &&
-        candidate.memoryTokens <= other.memoryTokens
-      ) {
-        frontier.splice(index, 1);
-      }
-    }
-    frontier.push(candidate);
-  }
-
-  return frontier.sort((a, b) => a.memoryTokens - b.memoryTokens);
-}
-
-function thinFrontier(frontier: PlanCandidate[], selectedId: string) {
-  if (frontier.length <= 22) return frontier;
-  const stride = Math.ceil(frontier.length / 20);
-  const thinned = frontier.filter((_, index) => index % stride === 0).slice(0, 20);
-  const selected = frontier.find((candidate) => candidate.id === selectedId);
-  if (selected && !thinned.some((candidate) => candidate.id === selected.id)) thinned.push(selected);
-  return thinned.sort((a, b) => a.memoryTokens - b.memoryTokens);
+  const feasible = candidates.filter((candidate) => candidate.feasible);
+  return feasible
+    .filter((candidate) => !feasible.some((other) =>
+      other.id !== candidate.id &&
+      other.memoryTokens <= candidate.memoryTokens &&
+      other.successProbability >= candidate.successProbability &&
+      (other.memoryTokens < candidate.memoryTokens || other.successProbability > candidate.successProbability),
+    ))
+    .sort((left, right) => left.memoryTokens - right.memoryTokens)
+    .slice(0, 24);
 }
 
 const memorySetKey = (memoryIds: string[]) => [...memoryIds].sort().join("|");
@@ -209,169 +241,170 @@ function buildCounterfactualPlans(
 ): CounterfactualPlan[] {
   const selectedMemories = memories.filter((memory) => selected.memoryIds.includes(memory.id));
   const rejectedMemories = memories.filter((memory) => !selected.memoryIds.includes(memory.id));
-  const chosen: Array<{ memory: MemoryCandidate; role: CounterfactualPlan["role"]; source: PlanCandidate }> = [];
   const pinned = selectedMemories.find((memory) => memory.policyCritical);
   const causal = selectedMemories
     .filter((memory) => !memory.policyCritical)
-    .sort((a, b) => b.successLift * b.relevance - a.successLift * a.relevance)[0];
+    .sort((left, right) =>
+      (right.successLift + (right.historicalOutcomeLift ?? 0)) * right.relevance -
+      (left.successLift + (left.historicalOutcomeLift ?? 0)) * left.relevance,
+    )[0];
   const rejected = rejectedMemories
-    .filter((memory) => memory.relevance < 0.4)
-    .sort((a, b) => a.relevance - b.relevance)[0] ?? rejectedMemories.at(-1);
-
-  if (pinned) chosen.push({ memory: pinned, role: "pinned", source: selected });
-  if (causal) chosen.push({ memory: causal, role: "selected", source: selected });
-  if (rejected) chosen.push({ memory: rejected, role: "rejected_control", source: baseline });
+    .filter((memory) => memory.relevance < 0.35)
+    .sort((left, right) => left.relevance - right.relevance)[0] ?? rejectedMemories.at(-1);
+  const chosen = [
+    pinned && { memory: pinned, role: "pinned" as const, source: selected },
+    causal && { memory: causal, role: "selected" as const, source: selected },
+    rejected && { memory: rejected, role: "rejected_control" as const, source: baseline },
+  ].filter((item): item is NonNullable<typeof item> => Boolean(item));
 
   return chosen.flatMap(({ memory, role, source }, index) => {
-    const ablatedIds = source.memoryIds.filter((id) => id !== memory.id);
+    const ablatedIds = source.memoryIds.filter((memoryId) => memoryId !== memory.id);
     const plan = candidatesByMemorySet.get(memorySetKey(ablatedIds));
     if (!plan) return [];
-    const expectedQualityDelta = source.successProbability - plan.successProbability;
     return [{
       id: `ablation-${index + 1}`,
       memoryId: memory.id,
       memoryContent: memory.content,
       role,
       plan,
-      expectedQualityDelta,
-      expectedPolicyPassed: !plan.blockers.includes("memory policy"),
+      expectedQualityDelta: source.successProbability - plan.successProbability,
+      expectedPolicyPassed: !plan.blockers.includes("memory policy") && !plan.blockers.includes("policy contradiction"),
       expectedRequiredFactsPreserved: !plan.blockers.includes("required fact coverage"),
     }];
   });
 }
 
-export function compileExecutionPlan(
+function relationshipWithSelected(
+  memoryId: string,
+  selectedIds: Set<string>,
+  relationships: MemoryRelationship[],
+) {
+  return relationships.find((edge) =>
+    (edge.sourceId === memoryId && selectedIds.has(edge.targetId)) ||
+    (edge.targetId === memoryId && selectedIds.has(edge.sourceId)),
+  );
+}
+
+function annotateMemories(
+  memories: MemoryCandidate[],
+  selected: PlanCandidate,
+  relationships: MemoryRelationship[],
+) {
+  const selectedIds = new Set(selected.memoryIds);
+  return memories.map((memory) => {
+    const selectedMemory = selectedIds.has(memory.id);
+    const relation = relationshipWithSelected(memory.id, selectedIds, relationships);
+    const utility =
+      ((memory.successLift + (memory.historicalOutcomeLift ?? 0)) *
+        memory.relevance *
+        memory.confidence *
+        1000) /
+      Math.max(1, memory.tokens);
+    if (selectedMemory) {
+      const decisionCode = memory.policyCritical
+        ? "pinned" as const
+        : (memory.historicalOutcomeLift ?? 0) > 0.04
+          ? "learned_case" as const
+          : "selected" as const;
+      return {
+        ...memory,
+        selected: true,
+        utilityPer1k: utility,
+        decisionCode,
+        decision: memory.policyCritical
+          ? "Pinned: required safety policy."
+          : decisionCode === "learned_case"
+            ? "Selected: a successful prior Raven case increased expected outcome value."
+            : "Selected: high marginal outcome value per token.",
+      };
+    }
+    const decisionCode = relation?.type === "contradicts"
+      ? "contradiction" as const
+      : relation?.type === "duplicate"
+        ? "redundant" as const
+        : (memory.recency ?? 0.7) < 0.3
+          ? "stale" as const
+          : memory.relevance < 0.3
+            ? "irrelevant" as const
+            : "low_value" as const;
+    return {
+      ...memory,
+      selected: false,
+      utilityPer1k: utility,
+      decisionCode,
+      decision: decisionCode === "contradiction"
+        ? "Rejected: conflicts with selected safety context."
+        : decisionCode === "redundant"
+          ? "Rejected: duplicates a higher-value selected memory."
+          : decisionCode === "stale"
+            ? "Rejected: stale evidence is dominated by newer context."
+            : decisionCode === "irrelevant"
+              ? "Rejected: insufficient relevance to this task."
+              : "Rejected: marginal value did not justify its token price.",
+    };
+  });
+}
+
+export function compileMemoryPortfolio(
   scenario: Scenario,
   objective: string,
-  constraints: RunConstraints,
+  constraints: MemoryGovernorConstraints,
   retrievedMemories: MemoryCandidate[],
 ): CompileResult {
-  const model = modelCatalog[1];
-  const fixedTools = scenario.tools.filter((tool) => tool.required);
-  const relationships = flattenRelationships(retrievedMemories);
-  const requiredFacts = scenario.requiredFacts ?? [];
-  const criticalMemoryIds = new Set(
-    retrievedMemories.filter((memory) => memory.policyCritical).map((memory) => memory.id),
-  );
+  const relationships = connectMemoryGraph(retrievedMemories);
   const memorySets = powerSet(retrievedMemories);
   const candidates = memorySets.map((memories, index) =>
     buildCandidate(
-      model,
       memories,
-      fixedTools,
+      retrievedMemories,
       relationships,
+      scenario,
       objective,
       constraints,
-      requiredFacts,
-      criticalMemoryIds,
       `portfolio-${index + 1}`,
     ),
   );
   const candidatesByMemorySet = new Map(
     candidates.map((candidate) => [memorySetKey(candidate.memoryIds), candidate]),
   );
-
-  const feasible = candidates.filter((candidate) => candidate.feasible);
-  const rankedPool = feasible.length
-    ? feasible
-    : [...candidates].sort(
-        (a, b) => a.blockers.length - b.blockers.length || b.score - a.score,
-      );
-  const selected = [...rankedPool].sort(
-    (a, b) => b.score - a.score || a.memoryTokens - b.memoryTokens,
-  )[0];
+  const feasible = candidates
+    .filter((candidate) => candidate.feasible)
+    .sort((left, right) => right.score - left.score || left.memoryTokens - right.memoryTokens);
+  const safeIgnoringBudget = candidates
+    .filter((candidate) => candidate.blockers.every((blocker) => blocker === "memory token budget"))
+    .sort((left, right) => left.memoryTokens - right.memoryTokens || right.successProbability - left.successProbability);
+  const minimumSafe = safeIgnoringBudget[0];
+  const selected = feasible[0] ?? minimumSafe ?? candidates
+    .slice()
+    .sort((left, right) => right.successProbability - left.successProbability)[0];
   const baseline = buildCandidate(
-    model,
     retrievedMemories,
-    fixedTools,
+    retrievedMemories,
     relationships,
+    scenario,
     objective,
-    {
-      ...constraints,
-      maxCost: Number.POSITIVE_INFINITY,
-      maxMemoryTokens: Number.POSITIVE_INFINITY,
-      maxLatencyMs: Number.POSITIVE_INFINITY,
-      minSuccess: 0,
-    },
-    requiredFacts,
-    criticalMemoryIds,
-    "baseline-full-memory",
+    constraints,
+    "uncontrolled-all-memory",
   );
-  const rawFrontier = paretoFrontier(feasible);
-  const frontier = thinFrontier(rawFrontier, selected.id);
-  const safetyEligible = candidates.filter((candidate) =>
-    candidate.blockers.every((blocker) => blocker === "cost ceiling" || blocker === "memory token budget"),
-  );
-  const minimumSafe = [...safetyEligible].sort(
-    (a, b) => a.memoryTokens - b.memoryTokens || a.estimatedCost - b.estimatedCost,
-  )[0] ?? selected;
-
-  const alternatives = [
-    [...feasible].sort((a, b) => a.memoryTokens - b.memoryTokens)[0],
-    [...feasible].sort((a, b) => b.successProbability - a.successProbability)[0],
-    baseline,
-  ].filter((candidate, index, list): candidate is PlanCandidate =>
-    Boolean(candidate) && list.findIndex((item) => item?.id === candidate.id) === index,
-  );
-
-  const selectedIds = new Set(selected.memoryIds);
-  const memories = retrievedMemories.map((memory) => {
-    const isSelected = selectedIds.has(memory.id);
-    const comparisonIds = isSelected
-      ? selected.memoryIds.filter((id) => id !== memory.id)
-      : [...selected.memoryIds, memory.id];
-    const comparisonPlan = candidatesByMemorySet.get(memorySetKey(comparisonIds));
-    const marginalQuality = comparisonPlan
-      ? isSelected
-        ? selected.successProbability - comparisonPlan.successProbability
-        : comparisonPlan.successProbability - selected.successProbability
-      : 0;
-    const utilityPer1k = (marginalQuality * 1000) / memory.tokens;
-    const selectedDuplicate = relationships.find(
-      (edge) =>
-        edge.sourceId === memory.id && edge.type === "duplicate" && selectedIds.has(edge.targetId),
-    );
-    const selectedContradiction = relationships.find(
-      (edge) =>
-        edge.sourceId === memory.id && edge.type === "contradicts" && selectedIds.has(edge.targetId),
-    );
-
-    let decision = "Rejected: lower marginal value than the purchased context.";
-    let decisionCode: MemoryCandidate["decisionCode"] = "low_value";
-    if (isSelected && memory.policyCritical) {
-      decision = "Pinned: required safety policy and cannot be auctioned away.";
-      decisionCode = "pinned";
-    } else if (isSelected) {
-      decision = `Purchased: ${utilityPer1k.toFixed(2)} utility points per 1K tokens.`;
-      decisionCode = "selected";
-    } else if (selectedContradiction) {
-      decision = "Rejected: contradicts a pinned policy in the selected context.";
-      decisionCode = "contradiction";
-    } else if (selectedDuplicate) {
-      decision = "Rejected: duplicates a higher-confidence selected memory.";
-      decisionCode = "redundant";
-    } else if (memory.relevance < 0.4) {
-      decision = "Rejected: irrelevant to the current task.";
-      decisionCode = "irrelevant";
-    }
-
-    return { ...memory, selected: isSelected, utilityPer1k, decision, decisionCode };
-  });
+  const frontier = paretoFrontier(candidates);
+  const memories = annotateMemories(retrievedMemories, selected, relationships);
 
   return {
     selected,
     baseline,
-    alternatives,
-    frontier,
+    alternatives: feasible.slice(1, 9),
+    frontier: frontier.some((candidate) => candidate.id === selected.id)
+      ? frontier
+      : [...frontier, selected].sort((left, right) => left.memoryTokens - right.memoryTokens),
     memories,
     evaluatedCount: candidates.length,
     feasibleCount: feasible.length,
-    dominatedCount: Math.max(0, feasible.length - rawFrontier.length),
+    dominatedCount: Math.max(0, candidates.length - frontier.length),
     objectiveFunction:
-      "maximize marginal outcome utility per memory token, subject to policy, fact coverage, dependency, quality, region, latency, and budget constraints",
+      "Exact constrained memory auction: maximize expected Raven outcome plus learned-case lift minus token price, redundancy, contradiction, staleness, and distraction.",
     relationshipEdges: relationships,
-    minimumSafeCost: minimumSafe.estimatedCost,
-    minimumSafeMemoryTokens: minimumSafe.memoryTokens,
+    minimumSafeCost: 0,
+    minimumSafeMemoryTokens: minimumSafe?.memoryTokens ?? 0,
     counterfactualPlans: buildCounterfactualPlans(
       candidatesByMemorySet,
       selected,
@@ -380,3 +413,6 @@ export function compileExecutionPlan(
     ),
   };
 }
+
+// Kept as a compatibility alias while Agent B migrates from the prerequisite contract.
+export const compileExecutionPlan = compileMemoryPortfolio;

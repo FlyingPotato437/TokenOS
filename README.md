@@ -1,21 +1,23 @@
 # TokenOS
 
-TokenOS is an economic memory compiler for production agents. A user gives it an objective and an execution contract: cost ceiling, latency SLA, quality floor, memory budget, strategy, and data region. TokenOS retrieves long-term memory, pins policy constraints, evaluates every candidate-memory portfolio, executes the winning context, evaluates the outcome, and records the economics.
+**Budget-aware memory for Raven.** Raven learns forever; TokenOS decides what it can afford to remember right now.
 
-The default build is a complete deterministic demo, so the core workflow works without credentials. Provider credentials switch the same workflow to EverOS and Snowflake.
+TokenOS sits between EverOS recall and Raven execution. It prices each recalled memory in tokens, connects duplicates and contradictions, pins non-negotiable policies, and runs an exact portfolio search to produce the smallest high-value context that satisfies the task's safety floor. It then compares uncontrolled Raven with governed Raven under the same task, model, tools, and generation settings.
 
-## Why it is technically different
+The default build is a deterministic, fully labeled replay. Add EverOS credentials and an installed Raven CLI to switch the same pipeline to live recall, live execution, Raven trace-based token measurement, and EverOS learning.
 
-- Exact search across all candidate-memory subsets instead of top-k similarity retrieval. The incident demo evaluates all `2^15 = 32,768` portfolios.
-- Hard feasibility checks for token and dollar budget, latency, quality, required facts, required tools, critical memories, dependencies, and region before inference.
-- A memory relationship graph prices duplicates, contradictions, dependencies, and complements into each portfolio.
-- Marginal utility per token explains why each memory was pinned, purchased, or rejected.
-- The baseline and compiled context use the same model, temperature, task, and tools so the token and cost delta is controlled.
-- Counterfactual runs remove pinned, purchased, and rejected-control memories to test whether safety, facts, or outcome quality changed.
-- Post-run evaluation checks policy, fact coverage, tool use, regional fit, and answer completeness.
-- The feedback loop writes the interaction to EverOS and a complete evidence payload to Snowflake.
+## What is technically different
 
-The default incident scenario buys a 194-token safe context from 15 candidates and refuses contracts below that proven safety floor.
+- EverOS user recall and Raven agent recall are separate: profiles/episodes and agent cases/skills are searched independently, then merged.
+- The incident demo examines all `2^15 = 32,768` memory portfolios instead of accepting a similarity top-k.
+- A memory-value graph prices duplicates, contradictions, dependencies, complements, staleness, distraction, and learned outcome lift.
+- Policies and required facts are hard constraints. An unsafe token budget is refused before Raven runs, with a computed minimum safe budget.
+- The A/B comparison changes memory only. Runtime, task fingerprint, configured model, tools, temperature, and output limit stay fixed.
+- Live token usage comes from Raven's isolated `llm.call` traces. If a provider omits usage, TokenOS marks the displayed count as an estimate.
+- Successful portfolios are appended to a small local evidence ledger and flushed to EverOS for Raven agent-case and skill extraction.
+- On the next related task, memories from successful cases receive a measurable historical outcome lift.
+
+The default balanced incident run selects four memories: the restart policy, prior connection-pool incident, successful diagnostic query, and operator communication preference.
 
 ## Run it
 
@@ -25,47 +27,45 @@ cp .env.example .env
 npm run dev
 ```
 
-Open [http://localhost:5173](http://localhost:5173).
+Open [http://localhost:5173](http://localhost:5173). The API runs on `127.0.0.1:8787`; Vite proxies `/api` during development.
 
-## Live providers
+## Live EverOS and Raven
 
-Add the following values to `.env`:
+Configure `.env` without committing it:
 
 ```dotenv
 EVEROS_API_KEY=
 EVEROS_BASE_URL=https://api.evermind.ai
 EVEROS_USER_ID=tokenos-demo-user
+EVEROS_AGENT_ID=tokenos-raven
 
-SNOWFLAKE_ACCOUNT_URL=https://your-account.snowflakecomputing.com
-SNOWFLAKE_PAT=
-SNOWFLAKE_DATABASE=
-SNOWFLAKE_SCHEMA=
-SNOWFLAKE_WAREHOUSE=
-SNOWFLAKE_ROLE=
-SNOWFLAKE_LEDGER_TABLE=TOKENOS_RUN_LEDGER
+RAVEN_COMMAND=raven
+RAVEN_MODEL=configured-default
+RAVEN_WORKSPACE=
+RAVEN_TIMEOUT_MS=120000
+
+TOKENOS_LEDGER_PATH=.tokenos/run-ledger.jsonl
 ```
 
-The Snowflake database and schema must already exist. TokenOS creates the ledger table on the first successful run. If SQL persistence is not configured, the recent-run API remains available in process at `GET /api/runs`.
+TokenOS invokes Raven's official one-shot form, `raven agent -m "..."`, and gives each run an isolated trace directory. The ledger directory and environment files are ignored by Git.
 
 ## Product flow
 
-1. **Recall:** hybrid-search EverOS for episodic and profile memory.
-2. **Constrain:** pin policy-critical memory and required tools.
-3. **Optimize:** enumerate every memory subset, reject hard-constraint violations, score the surviving portfolios, and expose the Pareto frontier.
-4. **Execute:** run a full-memory baseline and compiled-memory variant through the same Snowflake Cortex model and generation configuration.
-5. **Evaluate:** score the answer, run three causal ablations, and verify policies and required facts.
-6. **Learn:** add the interaction to EverOS and persist usage, exposure, graph, evaluation, and ablation evidence through the Snowflake SQL API.
+1. **Recall:** search both EverOS memory tracks for profiles, episodes, Raven cases, and skills.
+2. **Price:** count every candidate's memory tokens and apply successful-case lift.
+3. **Connect:** construct the memory relationship graph.
+4. **Compile:** enumerate every portfolio and reject unsafe, incomplete, contradictory, or over-budget sets.
+5. **Raven executes:** run uncontrolled and governed turns under one fixed execution contract, then compare token usage and policy results.
+6. **Learn:** record compact A/B evidence locally and flush successful outcomes to EverOS.
 
-## Acceptance coverage
+## Verification
 
-`npm run check` runs lint, 17 behavioral tests, server and client type-checks, and the production build. The suite covers:
+`npm run check` runs lint, 20 behavioral tests, server/client type-checks, and the production build. Coverage includes:
 
-- exact optimization, strategy tradeoffs, graph decisions, dependency enforcement, and minimum-safe-budget refusal;
-- deterministic and live-shaped EverOS retrieval, Cortex inference, and EverOS memory write-back;
-- Snowflake SQL table creation, complete evidence insertion, and identifier safety;
-- the streamed API lifecycle, same-model controlled comparison, ablations, recent-run ledger, validation, and pre-inference refusal.
-
-## Useful commands
+- exact memory search, all relationship classes, hard dependencies, learned-case bids, and computed safety refusal;
+- dual-track EverOS retrieval plus add-and-flush agent-case writeback;
+- official Raven CLI invocation and exact usage extraction from Raven traces;
+- same-runtime A/B controls, the streamed six-stage lifecycle, local evidence, and next-run learning.
 
 ```bash
 npm run lint
@@ -74,5 +74,3 @@ npm run build
 npm run check
 npm start
 ```
-
-The API runs on `127.0.0.1:8787` by default. Vite proxies `/api` to it during development.

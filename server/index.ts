@@ -2,43 +2,47 @@ import "dotenv/config";
 import express from "express";
 import { pathToFileURL } from "node:url";
 import { scenarios } from "../shared/catalog.ts";
+import type { CounterfactualResult, Evaluation, Scenario } from "../shared/contracts.ts";
 import type {
-  CounterfactualResult,
-  ExecutionComparison,
-  ProviderStatus,
-  RunEvent,
-  RunRequest,
-  RunResult,
-} from "../shared/contracts.ts";
-import { evaluateRun } from "./evaluator.ts";
-import { persistRunToSnowflake } from "./ledger.ts";
-import { compileExecutionPlan } from "./optimizer.ts";
+  LearningReceipt,
+  RavenComparison,
+  RavenExecutionVariant,
+  RavenRunEvent,
+  RavenRunRequest,
+  RavenRunResult,
+  SafeBudgetRefusal,
+} from "../shared/raven-contract.ts";
+import { evaluateRavenRun } from "./evaluator.ts";
+import { retrieveEverOSMemories, writeRavenCaseToEverOS } from "./everos.ts";
+import { persistLocalRun, readLearnedMemorySignals } from "./ledger.ts";
+import { compileMemoryPortfolio, connectMemoryGraph } from "./optimizer.ts";
 import {
-  CORTEX_GENERATION_CONFIG,
-  executeInference,
-  getProviderStatus,
-  retrieveMemories,
-  writeInteractionToEverOS,
-} from "./providers.ts";
+  buildExecutionContract,
+  executeRaven,
+  getRavenProviderStatus,
+} from "./raven.ts";
 
 export const app = express();
 const port = Number(process.env.PORT ?? 8787);
-export const recentRuns: RunResult[] = [];
+export const recentRuns: RavenRunResult[] = [];
 
 app.use(express.json({ limit: "1mb" }));
 
-app.get("/api/health", (_request, response) => {
-  response.json({ ok: true, service: "tokenos-compiler", providers: getProviderStatus() });
+app.get("/api/health", async (_request, response) => {
+  response.json({
+    ok: true,
+    service: "tokenos-raven-memory-governor",
+    providers: await getRavenProviderStatus(),
+  });
 });
 
 app.get("/api/scenarios", (_request, response) => {
   response.json(
-    scenarios.map(({ id, name, tag, objective, valueAtRisk, policy, tools }) => ({
+    scenarios.map(({ id, name, tag, objective, policy, tools }) => ({
       id,
       name,
       tag,
       objective,
-      valueAtRisk,
       policy,
       tools,
     })),
@@ -49,36 +53,102 @@ app.get("/api/runs", (_request, response) => {
   response.json(recentRuns);
 });
 
-function validRunRequest(body: unknown): body is RunRequest {
+function validRunRequest(body: unknown): body is RavenRunRequest {
   if (!body || typeof body !== "object") return false;
-  const candidate = body as Partial<RunRequest>;
-  const validStrategy = ["economy", "balanced", "quality"].includes(
-    String(candidate.constraints?.strategy),
-  );
-  const validRegion = ["ANY_REGION", "AWS_US", "AWS_EU"].includes(
-    String(candidate.constraints?.region),
-  );
+  const candidate = body as Partial<RavenRunRequest>;
+  const constraints = candidate.constraints;
   return Boolean(
     candidate.scenarioId &&
-      candidate.objective?.trim() &&
-      candidate.constraints &&
-      Number.isFinite(candidate.constraints.maxCost) &&
-      Number.isFinite(candidate.constraints.maxLatencyMs) &&
-      Number.isFinite(candidate.constraints.minSuccess) &&
-      Number.isFinite(candidate.constraints.maxMemoryTokens) &&
-      candidate.constraints.maxCost > 0 &&
-      candidate.constraints.maxLatencyMs > 0 &&
-      candidate.constraints.minSuccess >= 0 &&
-      candidate.constraints.minSuccess <= 1 &&
-      candidate.constraints.maxMemoryTokens > 0 &&
-      validStrategy &&
-      validRegion,
+    candidate.objective?.trim() &&
+    constraints &&
+    Number.isFinite(constraints.maxMemoryTokens) &&
+    constraints.maxMemoryTokens > 0 &&
+    Number.isFinite(constraints.minSuccess) &&
+    constraints.minSuccess >= 0 &&
+    constraints.minSuccess <= 1 &&
+    ["economy", "balanced", "quality"].includes(String(constraints.strategy)),
   );
+}
+
+function reduction(governed: number, uncontrolled: number) {
+  return uncontrolled > 0 ? Math.max(0, 1 - governed / uncontrolled) : 0;
+}
+
+function requiredFactsPreserved(evaluation: Evaluation) {
+  return evaluation.checks
+    .filter((check) => check.label === "Required facts" || check.label === "Pinned policies")
+    .every((check) => check.passed);
+}
+
+function executionVariant(
+  kind: RavenExecutionVariant["kind"],
+  answer: string,
+  memoryIds: string[],
+  memoryTokens: number,
+  usage: RavenExecutionVariant["usage"],
+  evaluation: Evaluation,
+): RavenExecutionVariant {
+  return {
+    kind,
+    answer,
+    memoryIds,
+    memoriesLoaded: memoryIds.length,
+    memoryTokens,
+    usage,
+    evaluation,
+  };
+}
+
+function counterfactualEvidence(
+  scenario: Scenario,
+  compile: ReturnType<typeof compileMemoryPortfolio>,
+  mode: RavenComparison["measurementMode"],
+): CounterfactualResult[] {
+  return compile.counterfactualPlans.map((counterfactual) => {
+    const evaluation = evaluateRavenRun(
+      scenario,
+      scenario.demoAnswer,
+      compile,
+      counterfactual.plan,
+    );
+    const policyPassed = evaluation.checks
+      .filter((check) => check.label === "Pinned policies" || check.label === "Policy result")
+      .every((check) => check.passed);
+    const factsPreserved = requiredFactsPreserved(evaluation);
+    return {
+      memoryId: counterfactual.memoryId,
+      memoryContent: counterfactual.memoryContent,
+      role: counterfactual.role,
+      promptTokens: counterfactual.plan.inputTokens,
+      qualityDelta: counterfactual.expectedQualityDelta,
+      policyPassed,
+      requiredFactsPreserved: factsPreserved,
+      outcomeChanged:
+        !policyPassed ||
+        !factsPreserved ||
+        Math.abs(counterfactual.expectedQualityDelta) >= 0.015,
+      mode,
+      detail: counterfactual.role === "pinned"
+        ? "Ablation fails the pinned-policy or required-fact gate before Raven executes."
+        : counterfactual.role === "selected"
+          ? `Removing this memory lowers expected outcome quality by ${(counterfactual.expectedQualityDelta * 100).toFixed(1)} points.`
+          : "This rejected control does not materially change the compiled outcome.",
+    };
+  });
+}
+
+function buildLesson(scenario: Scenario, selectedMemoryIds: string[]) {
+  if (scenario.id === "incident") {
+    return "For checkout-latency incidents, the restart policy, connection-pool history, diagnostic query, and operator communication preference were sufficient.";
+  }
+  return `For ${scenario.name.toLowerCase()}, the memory portfolio ${selectedMemoryIds.join(", ")} was sufficient while preserving every required fact and policy.`;
 }
 
 app.post("/api/run", async (request, response) => {
   if (!validRunRequest(request.body)) {
-    response.status(400).json({ error: "A scenario, objective, and valid constraints are required." });
+    response.status(400).json({
+      error: "A scenario, objective, token budget, quality floor, and strategy are required.",
+    });
     return;
   }
 
@@ -96,309 +166,329 @@ app.post("/api/run", async (request, response) => {
   response.flushHeaders();
 
   const runId = `tok_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
-  const initialProviders = getProviderStatus();
-  const demoPace = initialProviders.everos === "demo" && initialProviders.snowflake === "demo";
-  const pause = (milliseconds = 130) =>
-    new Promise((resolve) => setTimeout(resolve, demoPace ? milliseconds : 20));
-  const send = (event: RunEvent) => {
+  const createdAt = new Date().toISOString();
+  const initialProviders = await getRavenProviderStatus();
+  const demoPace = initialProviders.everos === "demo" && initialProviders.raven === "demo";
+  const pause = (milliseconds = 110) =>
+    new Promise((resolve) => setTimeout(resolve, demoPace ? milliseconds : 15));
+  const send = (event: RavenRunEvent) => {
     if (!response.destroyed) response.write(`${JSON.stringify(event)}\n`);
   };
 
   try {
+    const contract = buildExecutionContract(scenario, input.objective);
     send({
       type: "run.started",
       phase: "init",
       progress: 0.03,
-      message: `Run ${runId} accepted. Constraints locked.`,
-      data: { runId, providers: initialProviders },
+      message: `Run ${runId} accepted. Raven's model, task, tools, and generation settings are locked.`,
+      data: { runId, providers: initialProviders, executionContract: contract },
     });
     await pause();
 
     send({
       type: "recall.started",
       phase: "recall",
-      progress: 0.1,
-      message: "Searching EverOS for the top 15 profile, episode, event, and agent-case memories.",
+      progress: 0.09,
+      message: "Recalling user profiles and episodes plus Raven agent cases and skills from EverOS.",
     });
-    const retrieval = await retrieveMemories(scenario, input.objective);
+    const learnedSignals = await readLearnedMemorySignals(scenario.id);
+    const retrieval = await retrieveEverOSMemories(scenario, input.objective, learnedSignals);
     send({
       type: "recall.completed",
       phase: "recall",
-      progress: 0.24,
-      message: `${retrieval.memories.length} memories entered the economic compiler. ${retrieval.detail}`,
-      data: { memories: retrieval.memories, mode: retrieval.mode },
-    });
-    await pause(180);
-
-    const criticalCount = retrieval.memories.filter((memory) => memory.policyCritical).length;
-    const requiredToolCount = scenario.tools.filter((tool) => tool.required).length;
-    send({
-      type: "policy.completed",
-      phase: "policy",
-      progress: 0.34,
-      message: `${criticalCount} safety memories and ${scenario.requiredFacts?.length ?? 0} required facts were pinned before optimization.`,
+      progress: 0.2,
+      message: `${retrieval.memories.length} EverOS candidates recalled. ${retrieval.detail}`,
       data: {
-        policy: scenario.policy,
-        criticalCount,
-        requiredToolCount,
-        region: input.constraints.region,
+        memories: retrieval.memories,
+        mode: retrieval.mode,
+        historicalLiftApplied: retrieval.historicalLiftApplied,
       },
     });
     await pause();
 
+    const totalCandidateTokens = retrieval.memories.reduce((sum, memory) => sum + memory.tokens, 0);
     send({
-      type: "search.started",
-      phase: "search",
-      progress: 0.42,
-      message: "Enumerating memory portfolios and scoring relevance, recency, redundancy, contradictions, coverage, and token cost.",
+      type: "price.completed",
+      phase: "price",
+      progress: 0.29,
+      message: `${totalCandidateTokens.toLocaleString()} total memory tokens priced against a ${input.constraints.maxMemoryTokens.toLocaleString()}-token budget.`,
+      data: {
+        totalCandidateTokens,
+        budget: input.constraints.maxMemoryTokens,
+        candidates: retrieval.memories.map(({ id, tokens, successLift, historicalOutcomeLift }) => ({
+          id,
+          tokens,
+          successLift,
+          historicalOutcomeLift: historicalOutcomeLift ?? 0,
+        })),
+      },
     });
-    const compile = compileExecutionPlan(
+    await pause();
+
+    const relationshipGraph = connectMemoryGraph(retrieval.memories);
+    send({
+      type: "connect.completed",
+      phase: "connect",
+      progress: 0.38,
+      message: `${relationshipGraph.length} duplicate, contradiction, dependency, and complement edges connected.`,
+      data: { relationshipEdges: relationshipGraph },
+    });
+    await pause();
+
+    send({
+      type: "compile.started",
+      phase: "compile",
+      progress: 0.44,
+      message: "Running an exact constrained search across every candidate memory portfolio.",
+    });
+    const compile = compileMemoryPortfolio(
       scenario,
       input.objective,
       input.constraints,
       retrieval.memories,
     );
-    send({
-      type: "search.completed",
-      phase: "search",
-      progress: 0.62,
-      message: `${compile.evaluatedCount.toLocaleString()} memory portfolios evaluated. ${compile.feasibleCount.toLocaleString()} survived every hard constraint.`,
-      data: compile,
-    });
-    await pause(210);
-
     if (!compile.selected.feasible) {
+      const refusal: SafeBudgetRefusal = {
+        kind: "safe_budget_refusal",
+        runId,
+        scenarioId: scenario.id,
+        objective: input.objective,
+        requestedBudget: input.constraints.maxMemoryTokens,
+        minimumSafeBudget: compile.minimumSafeMemoryTokens,
+        missingPolicyMemoryIds: compile.memories
+          .filter((memory) => memory.policyCritical && !compile.selected.memoryIds.includes(memory.id))
+          .map((memory) => memory.id),
+        message: `No safe context can be compiled under this budget. Minimum safe budget: ${compile.minimumSafeMemoryTokens} tokens.`,
+        createdAt,
+      };
       send({
-        type: "run.error",
-        phase: "search",
+        type: "compile.refused",
+        phase: "compile",
         progress: 1,
-        message: `No safe context fits this contract. Minimum safe context: ${compile.minimumSafeMemoryTokens} memory tokens at $${compile.minimumSafeCost.toFixed(4)}.`,
-        data: { compile },
+        message: refusal.message,
+        data: { refusal, compile },
       });
       response.end();
       return;
     }
 
     send({
-      type: "inference.started",
-      phase: "inference",
-      progress: 0.68,
-      message: `Starting controlled baseline and optimized executions with the same ${compile.selected.modelName} configuration.`,
-      data: { selected: compile.selected, baseline: compile.baseline },
-    });
-
-    let baselineInference = await executeInference(
-      scenario,
-      input.objective,
-      compile,
-      retrieval.memories,
-      compile.baseline,
-      "baseline",
-    );
-    let optimizedInference = await executeInference(
-      scenario,
-      input.objective,
-      compile,
-      retrieval.memories,
-      compile.selected,
-      "optimized",
-    );
-    if (baselineInference.mode !== optimizedInference.mode) {
-      [baselineInference, optimizedInference] = await Promise.all([
-        executeInference(
-          scenario,
-          input.objective,
-          compile,
-          retrieval.memories,
-          compile.baseline,
-          "baseline",
-          true,
-        ),
-        executeInference(
-          scenario,
-          input.objective,
-          compile,
-          retrieval.memories,
-          compile.selected,
-          "optimized",
-          true,
-        ),
-      ]);
-    }
-    send({
-      type: "baseline.completed",
-      phase: "inference",
-      progress: 0.75,
-      message: `Baseline sent all ${compile.baseline.memoryIds.length} memories and used ${baselineInference.usage.promptTokens.toLocaleString()} prompt tokens.`,
-      data: { answer: baselineInference.answer, usage: baselineInference.usage, mode: baselineInference.mode },
-    });
-    await pause(90);
-    send({
-      type: "optimized.completed",
-      phase: "inference",
-      progress: 0.82,
-      message: `Compiled context sent ${compile.selected.memoryIds.length} memories and used ${optimizedInference.usage.promptTokens.toLocaleString()} prompt tokens.`,
-      data: { answer: optimizedInference.answer, usage: optimizedInference.usage, mode: optimizedInference.mode },
+      type: "compile.completed",
+      phase: "compile",
+      progress: 0.56,
+      message: `${compile.evaluatedCount.toLocaleString()} portfolios evaluated; ${compile.selected.memoryIds.length} memories purchased for Raven.`,
+      data: compile,
     });
     await pause();
 
-    const baselineEvaluation = evaluateRun(
+    send({
+      type: "raven.started",
+      phase: "execute",
+      progress: 0.62,
+      message: "Running uncontrolled and governed Raven turns with the same task, model, tools, and generation settings.",
+      data: { executionContract: contract },
+    });
+    let uncontrolled = await executeRaven({
+      runId,
+      kind: "uncontrolled",
       scenario,
-      baselineInference.answer,
+      objective: input.objective,
+      plan: compile.baseline,
+      memories: retrieval.memories,
+      contract,
+    });
+    let governed = await executeRaven({
+      runId,
+      kind: "governed",
+      scenario,
+      objective: input.objective,
+      plan: compile.selected,
+      memories: retrieval.memories,
+      contract,
+    });
+    if (uncontrolled.mode !== governed.mode || uncontrolled.model !== governed.model) {
+      [uncontrolled, governed] = await Promise.all([
+        executeRaven({
+          runId,
+          kind: "uncontrolled",
+          scenario,
+          objective: input.objective,
+          plan: compile.baseline,
+          memories: retrieval.memories,
+          contract,
+          forceReplay: true,
+        }),
+        executeRaven({
+          runId,
+          kind: "governed",
+          scenario,
+          objective: input.objective,
+          plan: compile.selected,
+          memories: retrieval.memories,
+          contract,
+          forceReplay: true,
+        }),
+      ]);
+    }
+
+    const uncontrolledEvaluation = evaluateRavenRun(
+      scenario,
+      uncontrolled.answer,
       compile,
-      input.constraints.region,
       compile.baseline,
     );
-    const optimizedEvaluation = evaluateRun(
+    const governedEvaluation = evaluateRavenRun(
       scenario,
-      optimizedInference.answer,
+      governed.answer,
       compile,
-      input.constraints.region,
       compile.selected,
     );
-    const comparison: ExecutionComparison = {
-      baseline: {
-        answer: baselineInference.answer,
-        usage: baselineInference.usage,
-        evaluation: baselineEvaluation,
-      },
-      optimized: {
-        answer: optimizedInference.answer,
-        usage: optimizedInference.usage,
-        evaluation: optimizedEvaluation,
-      },
-      tokenReduction: Math.max(
-        0,
-        1 - optimizedInference.usage.promptTokens / baselineInference.usage.promptTokens,
-      ),
-      costReduction: Math.max(
-        0,
-        1 - optimizedInference.usage.actualCost / baselineInference.usage.actualCost,
-      ),
-      requiredFactsPreserved: optimizedEvaluation.checks
-        .filter((check) => check.label === "Memory policy" || check.label === "Required facts")
-        .every((check) => check.passed),
-      sameModel: compile.selected.modelId === compile.baseline.modelId,
-      modelId: process.env.TOKENOS_FORCE_MODEL || compile.selected.modelId,
-      measurementMode: optimizedInference.mode,
-      generationConfig: {
-        temperature: CORTEX_GENERATION_CONFIG.temperature,
-        maxCompletionTokens: CORTEX_GENERATION_CONFIG.maxCompletionTokens,
-      },
+    const uncontrolledVariant = executionVariant(
+      "uncontrolled",
+      uncontrolled.answer,
+      compile.baseline.memoryIds,
+      compile.baseline.memoryTokens,
+      uncontrolled.usage,
+      uncontrolledEvaluation,
+    );
+    const governedVariant = executionVariant(
+      "governed",
+      governed.answer,
+      compile.selected.memoryIds,
+      compile.selected.memoryTokens,
+      governed.usage,
+      governedEvaluation,
+    );
+    send({
+      type: "uncontrolled.completed",
+      phase: "execute",
+      progress: 0.7,
+      message: `Uncontrolled Raven loaded ${uncontrolledVariant.memoriesLoaded} memories and used ${uncontrolled.usage.inputTokens.toLocaleString()} input tokens.`,
+      data: uncontrolledVariant,
+    });
+    send({
+      type: "governed.completed",
+      phase: "execute",
+      progress: 0.79,
+      message: `TokenOS governed Raven loaded ${governedVariant.memoriesLoaded} memories and used ${governed.usage.inputTokens.toLocaleString()} input tokens.`,
+      data: governedVariant,
+    });
+
+    const measurementMode = uncontrolled.mode === "live" && governed.mode === "live"
+      ? "live" as const
+      : uncontrolled.mode === "demo" && governed.mode === "demo"
+        ? "demo" as const
+        : "fallback" as const;
+    const comparison: RavenComparison = {
+      uncontrolled: uncontrolledVariant,
+      governed: governedVariant,
+      tokenReduction: reduction(governed.usage.inputTokens, uncontrolled.usage.inputTokens),
+      memoryTokenReduction: reduction(compile.selected.memoryTokens, compile.baseline.memoryTokens),
+      requiredFactsPreserved: requiredFactsPreserved(governedEvaluation),
+      sameRuntime: true,
+      sameModel: uncontrolled.model === governed.model,
+      sameTask: true,
+      sameTools: JSON.stringify(uncontrolled.tools) === JSON.stringify(governed.tools),
+      executionContract: contract,
+      measurementMode,
     };
-
     send({
-      type: "inference.completed",
-      phase: "inference",
-      progress: 0.85,
-      message: `Controlled comparison measured ${(comparison.costReduction * 100).toFixed(1)}% lower Cortex cost with the model held constant.`,
-      data: { comparison, mode: optimizedInference.mode },
+      type: "comparison.completed",
+      phase: "execute",
+      progress: 0.86,
+      message: `${(comparison.tokenReduction * 100).toFixed(1)}% fewer Raven input tokens with required facts and runtime controls preserved.`,
+      data: comparison,
     });
+    await pause();
 
+    const counterfactuals = counterfactualEvidence(scenario, compile, measurementMode);
+    const lesson = buildLesson(scenario, compile.selected.memoryIds);
     send({
-      type: "evaluation.completed",
-      phase: "evaluation",
-      progress: 0.9,
-      message: `The optimized answer preserved required facts and scored ${(optimizedEvaluation.score * 100).toFixed(1)}%.`,
-      data: optimizedEvaluation,
+      type: "learn.started",
+      phase: "learn",
+      progress: 0.91,
+      message: "Recording the successful memory portfolio as a reusable Raven agent case.",
+      data: { lesson, counterfactuals },
     });
-
-    const counterfactuals: CounterfactualResult[] = [];
-    for (const counterfactual of compile.counterfactualPlans) {
-      const execution = await executeInference(
-        scenario,
-        input.objective,
-        compile,
-        retrieval.memories,
-        counterfactual.plan,
-        "counterfactual",
-      );
-      const evaluation = evaluateRun(
-        scenario,
-        execution.answer,
-        compile,
-        input.constraints.region,
-        counterfactual.plan,
-      );
-      const sourceAnswer = counterfactual.role === "rejected_control"
-        ? baselineInference.answer
-        : optimizedInference.answer;
-      const answerChanged = execution.answer.trim() !== sourceAnswer.trim();
-      const policyPassed = evaluation.checks.find((check) => check.label === "Memory policy")?.passed ?? false;
-      const requiredFactsPreserved = evaluation.checks.find((check) => check.label === "Required facts")?.passed ?? false;
-      const outcomeChanged =
-        !policyPassed ||
-        !requiredFactsPreserved ||
-        answerChanged ||
-        Math.abs(counterfactual.expectedQualityDelta) >= 0.015;
-      const detail = counterfactual.role === "pinned"
-        ? "Removing this memory fails the safety or required-fact check."
-        : counterfactual.role === "selected"
-          ? `Removing this memory changes expected outcome quality by ${(counterfactual.expectedQualityDelta * 100).toFixed(1)} points.`
-          : `Removing this rejected control from full context changes expected quality by ${(counterfactual.expectedQualityDelta * 100).toFixed(1)} points.`;
-      counterfactuals.push({
-        memoryId: counterfactual.memoryId,
-        memoryContent: counterfactual.memoryContent,
-        role: counterfactual.role,
-        promptTokens: execution.usage.promptTokens,
-        qualityDelta: counterfactual.expectedQualityDelta,
-        policyPassed,
-        requiredFactsPreserved,
-        outcomeChanged,
-        mode: execution.mode,
-        detail,
+    const ledger = await persistLocalRun({
+      runId,
+      createdAt,
+      scenarioId: scenario.id,
+      objective: input.objective,
+      selectedMemoryIds: compile.selected.memoryIds,
+      allMemoryIds: compile.baseline.memoryIds,
+      selectedMemoryTokens: compile.selected.memoryTokens,
+      uncontrolledMemoryTokens: compile.baseline.memoryTokens,
+      uncontrolledInputTokens: uncontrolled.usage.inputTokens,
+      governedInputTokens: governed.usage.inputTokens,
+      tokenReduction: comparison.tokenReduction,
+      policyPassed: governedEvaluation.policyPassed,
+      requiredFactsPreserved: comparison.requiredFactsPreserved,
+      measurementEstimated: uncontrolled.usage.estimated || governed.usage.estimated,
+      lesson,
+    });
+    let learning: LearningReceipt;
+    if (governedEvaluation.policyPassed && comparison.requiredFactsPreserved) {
+      learning = await writeRavenCaseToEverOS({
+        runId,
+        objective: input.objective,
+        answer: governed.answer,
+        lesson,
+        selectedMemoryIds: compile.selected.memoryIds,
+        historicalLiftApplied: retrieval.historicalLiftApplied,
       });
+    } else {
+      learning = {
+        mode: "fallback",
+        written: false,
+        lesson,
+        historicalLiftApplied: retrieval.historicalLiftApplied,
+        detail: "The run failed its policy or required-fact gate, so it was not promoted into EverOS learning.",
+      };
     }
     send({
-      type: "counterfactual.completed",
-      phase: "evaluation",
-      progress: 0.96,
-      message: `${counterfactuals.length} same-model ablations proved which memories changed safety or outcome quality.`,
-      data: counterfactuals,
+      type: "learn.completed",
+      phase: "learn",
+      progress: 0.97,
+      message: `${learning.detail} ${ledger.detail}`,
+      data: { learning, ledger },
     });
 
-    const memoryWritten = await writeInteractionToEverOS(
-      input.objective,
-      optimizedInference.answer,
-      runId,
-    );
-    const providers: ProviderStatus = {
-      everos: retrieval.mode,
-      snowflake: optimizedInference.mode,
-      message: `${retrieval.detail} ${optimizedInference.detail}`,
-    };
-    const runWithoutLedger: Omit<RunResult, "ledger"> = {
+    const result: RavenRunResult = {
+      kind: "completed",
       runId,
       scenarioId: scenario.id,
       objective: input.objective,
-      answer: optimizedInference.answer,
+      answer: governed.answer,
       compile,
-      usage: optimizedInference.usage,
-      evaluation: optimizedEvaluation,
       comparison,
       counterfactuals,
-      providers,
-      createdAt: new Date().toISOString(),
+      providers: {
+        everos: retrieval.mode,
+        raven: measurementMode,
+        message: `${retrieval.detail} ${governed.detail}`,
+      },
+      ledger,
+      learning,
+      createdAt,
     };
-    const ledger = await persistRunToSnowflake(runWithoutLedger);
-    const result: RunResult = { ...runWithoutLedger, ledger };
     recentRuns.unshift(result);
     recentRuns.splice(10);
-
     send({
-      type: "ledger.completed",
-      phase: "ledger",
+      type: "run.completed",
+      phase: "learn",
       progress: 1,
-      message: `${ledger.detail}${memoryWritten ? " Outcome queued for EverOS consolidation." : ""}`,
+      message: `TokenOS compiled a safe Raven context and learned from run ${runId}.`,
       data: result,
     });
     response.end();
   } catch (error) {
     send({
       type: "run.error",
-      phase: "ledger",
+      phase: "learn",
       progress: 1,
-      message: error instanceof Error ? error.message : "The compiler run failed.",
+      message: error instanceof Error ? error.message : "The Raven memory-governor run failed.",
     });
     response.end();
   }
@@ -407,6 +497,6 @@ app.post("/api/run", async (request, response) => {
 const entrypoint = process.argv[1];
 if (entrypoint && import.meta.url === pathToFileURL(entrypoint).href) {
   app.listen(port, "127.0.0.1", () => {
-    console.log(`TokenOS compiler listening on http://127.0.0.1:${port}`);
+    console.log(`TokenOS Raven memory governor listening on http://127.0.0.1:${port}`);
   });
 }

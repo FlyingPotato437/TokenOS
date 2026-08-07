@@ -1,262 +1,125 @@
-import type { LedgerStatus, RunResult } from "../shared/contracts.ts";
+import { appendFile, mkdir, readFile } from "node:fs/promises";
+import { dirname, isAbsolute, resolve } from "node:path";
+import type { LocalRunLedgerStatus } from "../shared/raven-contract.ts";
+import type { LearnedMemorySignal } from "./everos.ts";
 
-type SqlApiResponse = {
-  code?: string;
-  message?: string;
-  statementHandle?: string;
-  statementStatusUrl?: string;
+export type LocalRunEvidence = {
+  runId: string;
+  createdAt: string;
+  scenarioId: string;
+  objective: string;
+  selectedMemoryIds: string[];
+  allMemoryIds: string[];
+  selectedMemoryTokens: number;
+  uncontrolledMemoryTokens: number;
+  uncontrolledInputTokens: number;
+  governedInputTokens: number;
+  tokenReduction: number;
+  policyPassed: boolean;
+  requiredFactsPreserved: boolean;
+  measurementEstimated: boolean;
+  lesson: string;
 };
 
-type SqlRequest = {
-  statement: string;
-  bindings?: Record<string, { type: "TEXT"; value: string }>;
-};
+const memoryEntries: LocalRunEvidence[] = [];
 
-const identifierPattern = /^[A-Za-z_][A-Za-z0-9_$]*$/;
-
-function configured(value: string | undefined) {
-  return Boolean(value && value.trim() && !value.includes("your-account"));
+function ledgerPath() {
+  const configured = process.env.TOKENOS_LEDGER_PATH?.trim() || ".tokenos/run-ledger.jsonl";
+  return isAbsolute(configured) ? configured : resolve(process.cwd(), configured);
 }
 
-function requiredIdentifier(value: string | undefined, fallback?: string) {
-  const identifier = (value || fallback || "").trim();
-  if (!identifierPattern.test(identifier)) {
-    throw new Error(`Invalid Snowflake identifier: ${identifier || "missing value"}`);
+function validEntry(value: unknown): value is LocalRunEvidence {
+  if (!value || typeof value !== "object") return false;
+  const candidate = value as Partial<LocalRunEvidence>;
+  return Boolean(
+    candidate.runId &&
+    candidate.scenarioId &&
+    Array.isArray(candidate.selectedMemoryIds) &&
+    typeof candidate.policyPassed === "boolean" &&
+    typeof candidate.requiredFactsPreserved === "boolean",
+  );
+}
+
+async function diskEntries() {
+  try {
+    const contents = await readFile(ledgerPath(), "utf8");
+    return contents
+      .split("\n")
+      .filter(Boolean)
+      .flatMap((line) => {
+        try {
+          const parsed = JSON.parse(line) as unknown;
+          return validEntry(parsed) ? [parsed] : [];
+        } catch {
+          return [];
+        }
+      });
+  } catch (error) {
+    const code = error && typeof error === "object" && "code" in error
+      ? String((error as { code?: unknown }).code)
+      : "";
+    if (code === "ENOENT") return [];
+    throw error;
   }
-  return identifier;
 }
 
-function wait(milliseconds: number) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function uniqueEntries(entries: LocalRunEvidence[]) {
+  const byRunId = new Map<string, LocalRunEvidence>();
+  entries.forEach((entry) => byRunId.set(entry.runId, entry));
+  return [...byRunId.values()];
 }
 
-function sqlHeaders(pat: string) {
-  return {
-    Authorization: `Bearer ${pat}`,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    "User-Agent": "TokenOS/1.0",
-    "X-Snowflake-Authorization-Token-Type": "PROGRAMMATIC_ACCESS_TOKEN",
-  };
-}
-
-async function readSqlResponse(response: Response) {
-  const payload = (await response.json().catch(() => ({}))) as SqlApiResponse;
-  if (!response.ok && response.status !== 202) {
-    throw new Error(payload.message || `Snowflake SQL API returned ${response.status}`);
+export async function readLearnedMemorySignals(scenarioId: string): Promise<LearnedMemorySignal[]> {
+  let stored: LocalRunEvidence[] = [];
+  try {
+    stored = await diskEntries();
+  } catch {
+    // The in-memory index remains available if local disk access fails.
   }
-  return payload;
+  const successful = uniqueEntries([...stored, ...memoryEntries]).filter(
+    (entry) =>
+      entry.scenarioId === scenarioId &&
+      entry.policyPassed &&
+      entry.requiredFactsPreserved,
+  );
+  return successful.map((entry, index) => ({
+    runId: entry.runId,
+    memoryIds: entry.selectedMemoryIds,
+    occurrences: successful
+      .slice(0, index + 1)
+      .filter((candidate) => candidate.selectedMemoryIds.some((id) => entry.selectedMemoryIds.includes(id)))
+      .length,
+  }));
 }
 
-async function submitStatement(request: SqlRequest) {
-  const accountUrl = process.env.SNOWFLAKE_ACCOUNT_URL!;
-  const pat = process.env.SNOWFLAKE_PAT!;
-  const database = requiredIdentifier(process.env.SNOWFLAKE_DATABASE);
-  const schema = requiredIdentifier(process.env.SNOWFLAKE_SCHEMA);
-  const warehouse = process.env.SNOWFLAKE_WAREHOUSE?.trim();
-  const role = process.env.SNOWFLAKE_ROLE?.trim();
-
-  const response = await fetch(`${accountUrl.replace(/\/$/, "")}/api/v2/statements`, {
-    method: "POST",
-    headers: sqlHeaders(pat),
-    body: JSON.stringify({
-      ...request,
-      timeout: 45,
-      database,
-      schema,
-      ...(warehouse ? { warehouse } : {}),
-      ...(role ? { role } : {}),
-    }),
-    signal: AbortSignal.timeout(50_000),
-  });
-  let payload = await readSqlResponse(response);
-
-  for (let attempt = 0; response.status === 202 && attempt < 8; attempt += 1) {
-    await wait(350 + attempt * 150);
-    const statusPath = payload.statementStatusUrl ||
-      (payload.statementHandle ? `/api/v2/statements/${payload.statementHandle}` : "");
-    if (!statusPath) throw new Error("Snowflake returned an async query without a status URL.");
-    const statusUrl = statusPath.startsWith("http")
-      ? statusPath
-      : `${accountUrl.replace(/\/$/, "")}${statusPath.startsWith("/") ? "" : "/"}${statusPath}`;
-    const statusResponse = await fetch(statusUrl, {
-      headers: sqlHeaders(pat),
-      signal: AbortSignal.timeout(10_000),
-    });
-    payload = await readSqlResponse(statusResponse);
-    if (statusResponse.status !== 202) return payload;
-  }
-
-  if (response.status === 202) {
-    throw new Error("Snowflake ledger statement is still running.");
-  }
-  return payload;
-}
-
-export async function persistRunToSnowflake(
-  run: Omit<RunResult, "ledger">,
-): Promise<LedgerStatus> {
-  const accountUrl = process.env.SNOWFLAKE_ACCOUNT_URL;
-  const pat = process.env.SNOWFLAKE_PAT;
-  const database = process.env.SNOWFLAKE_DATABASE;
-  const schema = process.env.SNOWFLAKE_SCHEMA;
-
-  if (!configured(accountUrl) || !configured(pat) || !configured(database) || !configured(schema)) {
+export async function persistLocalRun(entry: LocalRunEvidence): Promise<LocalRunLedgerStatus> {
+  memoryEntries.unshift(entry);
+  memoryEntries.splice(50);
+  if (process.env.TOKENOS_LEDGER_PATH === ":memory:") {
     return {
-      mode: "local",
-      detail: "Run retained in the in-process ledger. Configure Snowflake database and schema to persist it.",
+      mode: "memory",
+      entryId: entry.runId,
+      detail: "A/B evidence and the successful memory portfolio were retained in the process learning ledger.",
     };
   }
-
   try {
-    const table = requiredIdentifier(process.env.SNOWFLAKE_LEDGER_TABLE, "TOKENOS_RUN_LEDGER");
-    const fullyQualifiedTable = [
-      requiredIdentifier(database),
-      requiredIdentifier(schema),
-      table,
-    ].join(".");
-
-    await submitStatement({
-      statement: `CREATE TABLE IF NOT EXISTS ${fullyQualifiedTable} (
-        RUN_ID STRING PRIMARY KEY,
-        CREATED_AT TIMESTAMP_TZ,
-        SCENARIO_ID STRING,
-        OBJECTIVE STRING,
-        MODEL_NAME STRING,
-        MEMORY_COUNT NUMBER,
-        TOOL_COUNT NUMBER,
-        ESTIMATED_COST FLOAT,
-        ACTUAL_COST FLOAT,
-        SUCCESS_PROBABILITY FLOAT,
-        EVALUATION_SCORE FLOAT,
-        PROMPT_TOKENS NUMBER,
-        COMPLETION_TOKENS NUMBER,
-        BASELINE_COST FLOAT,
-        BASELINE_PROMPT_TOKENS NUMBER,
-        OPTIMIZED_PROMPT_TOKENS NUMBER,
-        BASELINE_COMPLETION_TOKENS NUMBER,
-        OPTIMIZED_COMPLETION_TOKENS NUMBER,
-        TOKEN_REDUCTION FLOAT,
-        COST_REDUCTION FLOAT,
-        REQUIRED_FACTS_PRESERVED BOOLEAN,
-        BASELINE_EVALUATION_SCORE FLOAT,
-        OPTIMIZED_EVALUATION_SCORE FLOAT,
-        BASELINE_POLICY_PASSED BOOLEAN,
-        OPTIMIZED_POLICY_PASSED BOOLEAN,
-        MEASUREMENT_MODE STRING,
-        PROVIDER_MODE STRING,
-        GENERATION_CONFIG VARIANT,
-        MEMORY_EXPOSURE_JSON VARIANT,
-        PLAN_JSON VARIANT,
-        COUNTERFACTUAL_JSON VARIANT,
-        EVIDENCE_JSON VARIANT
-      )`,
-    });
-
-    const payload = JSON.stringify({
-      runId: run.runId,
-      createdAt: run.createdAt,
-      scenarioId: run.scenarioId,
-      objective: run.objective,
-      modelName: run.compile.selected.modelName,
-      memoryCount: run.compile.selected.memoryIds.length,
-      toolCount: run.compile.selected.toolIds.length,
-      estimatedCost: run.compile.selected.estimatedCost,
-      actualCost: run.usage.actualCost,
-      successProbability: run.compile.selected.successProbability,
-      evaluationScore: run.evaluation.score,
-      promptTokens: run.usage.promptTokens,
-      completionTokens: run.usage.completionTokens,
-      baselineCost: run.comparison.baseline.usage.actualCost,
-      baselinePromptTokens: run.comparison.baseline.usage.promptTokens,
-      optimizedPromptTokens: run.comparison.optimized.usage.promptTokens,
-      baselineCompletionTokens: run.comparison.baseline.usage.completionTokens,
-      optimizedCompletionTokens: run.comparison.optimized.usage.completionTokens,
-      tokenReduction: run.comparison.tokenReduction,
-      costReduction: run.comparison.costReduction,
-      requiredFactsPreserved: run.comparison.requiredFactsPreserved,
-      baselineEvaluationScore: run.comparison.baseline.evaluation.score,
-      optimizedEvaluationScore: run.comparison.optimized.evaluation.score,
-      baselinePolicyPassed: run.comparison.baseline.evaluation.policyPassed,
-      optimizedPolicyPassed: run.comparison.optimized.evaluation.policyPassed,
-      measurementMode: run.comparison.measurementMode,
-      providerMode: run.providers.snowflake,
-      generationConfig: run.comparison.generationConfig,
-      memoryExposure: run.compile.memories.map((memory) => ({
-        id: memory.id,
-        source: memory.source,
-        tokens: memory.tokens,
-        selected: memory.selected,
-        decision: memory.decisionCode,
-        utilityPer1k: memory.utilityPer1k,
-      })),
-      plan: run.compile.selected,
-      counterfactuals: run.counterfactuals,
-      evidence: {
-        comparison: run.comparison,
-        evaluation: run.evaluation,
-        counterfactuals: run.counterfactuals,
-        relationshipEdges: run.compile.relationshipEdges,
-        evaluatedCount: run.compile.evaluatedCount,
-        feasibleCount: run.compile.feasibleCount,
-      },
-    });
-
-    await submitStatement({
-      statement: `INSERT INTO ${fullyQualifiedTable} (
-        RUN_ID, CREATED_AT, SCENARIO_ID, OBJECTIVE, MODEL_NAME, MEMORY_COUNT, TOOL_COUNT,
-        ESTIMATED_COST, ACTUAL_COST, SUCCESS_PROBABILITY, EVALUATION_SCORE, PROMPT_TOKENS,
-        COMPLETION_TOKENS, BASELINE_COST, BASELINE_PROMPT_TOKENS, OPTIMIZED_PROMPT_TOKENS,
-        BASELINE_COMPLETION_TOKENS, OPTIMIZED_COMPLETION_TOKENS, TOKEN_REDUCTION, COST_REDUCTION,
-        REQUIRED_FACTS_PRESERVED, BASELINE_EVALUATION_SCORE, OPTIMIZED_EVALUATION_SCORE,
-        BASELINE_POLICY_PASSED, OPTIMIZED_POLICY_PASSED, MEASUREMENT_MODE, PROVIDER_MODE,
-        GENERATION_CONFIG, MEMORY_EXPOSURE_JSON, PLAN_JSON, COUNTERFACTUAL_JSON, EVIDENCE_JSON
-      )
-      SELECT
-        value:runId::STRING,
-        TO_TIMESTAMP_TZ(value:createdAt::STRING),
-        value:scenarioId::STRING,
-        value:objective::STRING,
-        value:modelName::STRING,
-        value:memoryCount::NUMBER,
-        value:toolCount::NUMBER,
-        value:estimatedCost::FLOAT,
-        value:actualCost::FLOAT,
-        value:successProbability::FLOAT,
-        value:evaluationScore::FLOAT,
-        value:promptTokens::NUMBER,
-        value:completionTokens::NUMBER,
-        value:baselineCost::FLOAT,
-        value:baselinePromptTokens::NUMBER,
-        value:optimizedPromptTokens::NUMBER,
-        value:baselineCompletionTokens::NUMBER,
-        value:optimizedCompletionTokens::NUMBER,
-        value:tokenReduction::FLOAT,
-        value:costReduction::FLOAT,
-        value:requiredFactsPreserved::BOOLEAN,
-        value:baselineEvaluationScore::FLOAT,
-        value:optimizedEvaluationScore::FLOAT,
-        value:baselinePolicyPassed::BOOLEAN,
-        value:optimizedPolicyPassed::BOOLEAN,
-        value:measurementMode::STRING,
-        value:providerMode::STRING,
-        value:generationConfig::VARIANT,
-        value:memoryExposure::VARIANT,
-        value:plan::VARIANT,
-        value:counterfactuals::VARIANT,
-        value:evidence::VARIANT
-      FROM (SELECT PARSE_JSON(?) AS value)`,
-      bindings: { "1": { type: "TEXT", value: payload } },
-    });
-
+    const path = ledgerPath();
+    await mkdir(dirname(path), { recursive: true });
+    await appendFile(path, `${JSON.stringify(entry)}\n`, { encoding: "utf8", mode: 0o600 });
     return {
-      mode: "snowflake",
-      detail: `Run persisted to ${fullyQualifiedTable}.`,
+      mode: "disk",
+      entryId: entry.runId,
+      detail: "A/B evidence and the successful memory portfolio were appended to the local TokenOS ledger.",
     };
   } catch (error) {
     return {
       mode: "fallback",
-      detail: `Snowflake ledger fallback: ${error instanceof Error ? error.message : "request failed"}`,
+      entryId: entry.runId,
+      detail: `The disk ledger was unavailable, so evidence remains in memory: ${error instanceof Error ? error.message : "write failed"}.`,
     };
   }
+}
+
+export function resetMemoryLedger() {
+  memoryEntries.splice(0);
 }

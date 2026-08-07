@@ -95,7 +95,7 @@ export const scenarios: Scenario[] = [
         tokens: 39,
         relevance: 0.82,
         confidence: 0.96,
-        successLift: 0.07,
+        successLift: 0.15,
       },
       {
         id: "inc-event-2",

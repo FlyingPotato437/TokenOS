@@ -1,151 +1,84 @@
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { afterEach, test } from "node:test";
-import { scenarios } from "../shared/catalog.ts";
-import type { ExecutionComparison, RunResult, RunUsage } from "../shared/contracts.ts";
-import { evaluateRun } from "./evaluator.ts";
-import { persistRunToSnowflake } from "./ledger.ts";
-import { compileExecutionPlan } from "./optimizer.ts";
+import {
+  type LocalRunEvidence,
+  persistLocalRun,
+  readLearnedMemorySignals,
+  resetMemoryLedger,
+} from "./ledger.ts";
 
-const ledgerKeys = [
-  "SNOWFLAKE_ACCOUNT_URL",
-  "SNOWFLAKE_PAT",
-  "SNOWFLAKE_DATABASE",
-  "SNOWFLAKE_SCHEMA",
-  "SNOWFLAKE_WAREHOUSE",
-  "SNOWFLAKE_ROLE",
-  "SNOWFLAKE_LEDGER_TABLE",
-] as const;
-const originalEnvironment = Object.fromEntries(ledgerKeys.map((key) => [key, process.env[key]]));
-const originalFetch = globalThis.fetch;
+const originalPath = process.env.TOKENOS_LEDGER_PATH;
+const temporaryDirectories: string[] = [];
 
-function clearLedgerEnvironment() {
-  ledgerKeys.forEach((key) => delete process.env[key]);
-}
-
-function buildRun(): Omit<RunResult, "ledger"> {
-  const scenario = scenarios[0];
-  const compile = compileExecutionPlan(scenario, scenario.objective, {
-    maxCost: 0.003,
-    maxLatencyMs: 1800,
-    minSuccess: 0.9,
-    maxMemoryTokens: 360,
-    strategy: "balanced",
-    region: "ANY_REGION",
-  }, scenario.memories);
-  const optimizedUsage: RunUsage = {
-    promptTokens: 674,
-    completionTokens: 120,
-    totalTokens: 794,
-    actualCost: 0.0005,
-    estimated: true,
-  };
-  const baselineUsage: RunUsage = {
-    promptTokens: 1461,
-    completionTokens: 120,
-    totalTokens: 1581,
-    actualCost: 0.0007,
-    estimated: true,
-  };
-  const optimizedEvaluation = evaluateRun(scenario, scenario.demoAnswer, compile, "ANY_REGION");
-  const baselineEvaluation = evaluateRun(
-    scenario,
-    scenario.demoAnswer,
-    compile,
-    "ANY_REGION",
-    compile.baseline,
-  );
-  const comparison: ExecutionComparison = {
-    baseline: { answer: scenario.demoAnswer, usage: baselineUsage, evaluation: baselineEvaluation },
-    optimized: { answer: scenario.demoAnswer, usage: optimizedUsage, evaluation: optimizedEvaluation },
-    tokenReduction: 1 - optimizedUsage.promptTokens / baselineUsage.promptTokens,
-    costReduction: 1 - optimizedUsage.actualCost / baselineUsage.actualCost,
-    requiredFactsPreserved: true,
-    sameModel: true,
-    modelId: compile.selected.modelId,
-    measurementMode: "demo",
-    generationConfig: { temperature: 0, maxCompletionTokens: 600 },
-  };
-
+function evidence(runId: string, policyPassed = true): LocalRunEvidence {
   return {
-    runId: "ledger-test-run",
-    scenarioId: scenario.id,
-    objective: scenario.objective,
-    answer: scenario.demoAnswer,
-    compile,
-    usage: optimizedUsage,
-    evaluation: optimizedEvaluation,
-    comparison,
-    counterfactuals: [],
-    providers: { everos: "demo", snowflake: "demo", message: "test" },
+    runId,
     createdAt: "2026-08-07T18:00:00.000Z",
+    scenarioId: "incident",
+    objective: "Investigate checkout latency safely.",
+    selectedMemoryIds: ["inc-policy-1", "inc-episode-1", "inc-case-1", "inc-profile-2"],
+    allMemoryIds: ["inc-policy-1", "inc-episode-1", "inc-case-1", "inc-profile-2", "noise"],
+    selectedMemoryTokens: 233,
+    uncontrolledMemoryTokens: 1015,
+    uncontrolledInputTokens: 1400,
+    governedInputTokens: 620,
+    tokenReduction: 0.557,
+    policyPassed,
+    requiredFactsPreserved: policyPassed,
+    measurementEstimated: false,
+    lesson: "The four-memory incident portfolio was sufficient.",
   };
 }
 
-afterEach(() => {
-  ledgerKeys.forEach((key) => {
-    const value = originalEnvironment[key];
-    if (value === undefined) delete process.env[key];
-    else process.env[key] = value;
-  });
-  globalThis.fetch = originalFetch;
+afterEach(async () => {
+  resetMemoryLedger();
+  if (originalPath === undefined) delete process.env.TOKENOS_LEDGER_PATH;
+  else process.env.TOKENOS_LEDGER_PATH = originalPath;
+  await Promise.all(temporaryDirectories.splice(0).map((directory) =>
+    rm(directory, { recursive: true, force: true }),
+  ));
 });
 
-test("the ledger stays locally available when Snowflake SQL is not configured", async () => {
-  clearLedgerEnvironment();
-  const result = await persistRunToSnowflake(buildRun());
+test("the local ledger appends compact A/B evidence to a private JSONL file", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tokenos-ledger-test-"));
+  temporaryDirectories.push(directory);
+  const path = join(directory, "runs.jsonl");
+  process.env.TOKENOS_LEDGER_PATH = path;
 
-  assert.equal(result.mode, "local");
-  assert.match(result.detail, /in-process ledger/);
+  const result = await persistLocalRun(evidence("run-1"));
+  const stored = (await readFile(path, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+
+  assert.equal(result.mode, "disk");
+  assert.equal(result.entryId, "run-1");
+  assert.equal(stored.length, 1);
+  assert.equal(stored[0].tokenReduction, 0.557);
+  assert.deepEqual(stored[0].selectedMemoryIds, evidence("run-1").selectedMemoryIds);
 });
 
-test("Snowflake persistence creates the evidence table and inserts a complete proof payload", async () => {
-  clearLedgerEnvironment();
-  process.env.SNOWFLAKE_ACCOUNT_URL = "https://snowflake.example";
-  process.env.SNOWFLAKE_PAT = "snowflake-test-pat";
-  process.env.SNOWFLAKE_DATABASE = "TOKENOS_DB";
-  process.env.SNOWFLAKE_SCHEMA = "PUBLIC";
-  process.env.SNOWFLAKE_LEDGER_TABLE = "RUN_EVIDENCE";
-  const requests: Array<Record<string, unknown>> = [];
-  globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-    requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-    return new Response(JSON.stringify({}), {
-      status: 200,
-      headers: { "Content-Type": "application/json" },
-    });
-  }) as typeof fetch;
+test("successful local cases become historical bid signals on the next task", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "tokenos-learning-test-"));
+  temporaryDirectories.push(directory);
+  process.env.TOKENOS_LEDGER_PATH = join(directory, "runs.jsonl");
 
-  const result = await persistRunToSnowflake(buildRun());
-  const insert = requests[1];
-  const bindings = insert.bindings as Record<string, { value: string }>;
-  const payload = JSON.parse(bindings["1"].value) as Record<string, unknown>;
-  const evidence = payload.evidence as Record<string, unknown>;
+  await persistLocalRun(evidence("run-1"));
+  await persistLocalRun(evidence("run-2"));
+  await persistLocalRun(evidence("unsafe-run", false));
+  const signals = await readLearnedMemorySignals("incident");
 
-  assert.equal(result.mode, "snowflake");
-  assert.equal(requests.length, 2);
-  assert.match(String(requests[0].statement), /CREATE TABLE IF NOT EXISTS TOKENOS_DB\.PUBLIC\.RUN_EVIDENCE/);
-  assert.match(String(insert.statement), /INSERT INTO TOKENOS_DB\.PUBLIC\.RUN_EVIDENCE/);
-  assert.equal(payload.requiredFactsPreserved, true);
-  assert.ok(Array.isArray(payload.memoryExposure));
-  assert.ok(Array.isArray(evidence.relationshipEdges));
-  assert.equal(evidence.evaluatedCount, 32768);
+  assert.equal(signals.length, 2);
+  assert.deepEqual(signals.map((signal) => signal.runId), ["run-1", "run-2"]);
+  assert.equal(signals.at(-1)?.occurrences, 2);
+  assert.ok(signals.every((signal) => signal.memoryIds.includes("inc-case-1")));
 });
 
-test("unsafe Snowflake identifiers are rejected before a SQL request is sent", async () => {
-  clearLedgerEnvironment();
-  process.env.SNOWFLAKE_ACCOUNT_URL = "https://snowflake.example";
-  process.env.SNOWFLAKE_PAT = "snowflake-test-pat";
-  process.env.SNOWFLAKE_DATABASE = "TOKENOS_DB";
-  process.env.SNOWFLAKE_SCHEMA = "PUBLIC";
-  process.env.SNOWFLAKE_LEDGER_TABLE = "RUN_EVIDENCE;DROP_TABLE";
-  let called = false;
-  globalThis.fetch = (async () => {
-    called = true;
-    return new Response(JSON.stringify({}), { status: 200 });
-  }) as typeof fetch;
+test("the evidence ledger still works in explicitly ephemeral demo mode", async () => {
+  process.env.TOKENOS_LEDGER_PATH = ":memory:";
+  const result = await persistLocalRun(evidence("memory-run"));
+  const signals = await readLearnedMemorySignals("incident");
 
-  const result = await persistRunToSnowflake(buildRun());
-
-  assert.equal(result.mode, "fallback");
-  assert.match(result.detail, /Invalid Snowflake identifier/);
-  assert.equal(called, false);
+  assert.equal(result.mode, "memory");
+  assert.equal(signals[0].runId, "memory-run");
 });
