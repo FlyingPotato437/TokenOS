@@ -223,6 +223,7 @@ export const scenarios: Scenario[] = [
         recency: 0.61,
         relationships: [
           { targetId: "inc-event-2", type: "complements", strength: 0.72 },
+          { targetId: "inc-event-2", type: "depends_on", strength: 0.84 },
         ],
       },
       {

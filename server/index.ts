@@ -13,6 +13,7 @@ import { evaluateRun } from "./evaluator.ts";
 import { persistRunToSnowflake } from "./ledger.ts";
 import { compileExecutionPlan } from "./optimizer.ts";
 import {
+  CORTEX_GENERATION_CONFIG,
   executeInference,
   getProviderStatus,
   retrieveMemories,
@@ -50,6 +51,12 @@ app.get("/api/runs", (_request, response) => {
 function validRunRequest(body: unknown): body is RunRequest {
   if (!body || typeof body !== "object") return false;
   const candidate = body as Partial<RunRequest>;
+  const validStrategy = ["economy", "balanced", "quality"].includes(
+    String(candidate.constraints?.strategy),
+  );
+  const validRegion = ["ANY_REGION", "AWS_US", "AWS_EU"].includes(
+    String(candidate.constraints?.region),
+  );
   return Boolean(
     candidate.scenarioId &&
       candidate.objective?.trim() &&
@@ -57,7 +64,14 @@ function validRunRequest(body: unknown): body is RunRequest {
       Number.isFinite(candidate.constraints.maxCost) &&
       Number.isFinite(candidate.constraints.maxLatencyMs) &&
       Number.isFinite(candidate.constraints.minSuccess) &&
-      Number.isFinite(candidate.constraints.maxMemoryTokens),
+      Number.isFinite(candidate.constraints.maxMemoryTokens) &&
+      candidate.constraints.maxCost > 0 &&
+      candidate.constraints.maxLatencyMs > 0 &&
+      candidate.constraints.minSuccess >= 0 &&
+      candidate.constraints.minSuccess <= 1 &&
+      candidate.constraints.maxMemoryTokens > 0 &&
+      validStrategy &&
+      validRegion,
   );
 }
 
@@ -172,7 +186,7 @@ app.post("/api/run", async (request, response) => {
       data: { selected: compile.selected, baseline: compile.baseline },
     });
 
-    const baselineInference = await executeInference(
+    let baselineInference = await executeInference(
       scenario,
       input.objective,
       compile,
@@ -180,6 +194,36 @@ app.post("/api/run", async (request, response) => {
       compile.baseline,
       "baseline",
     );
+    let optimizedInference = await executeInference(
+      scenario,
+      input.objective,
+      compile,
+      retrieval.memories,
+      compile.selected,
+      "optimized",
+    );
+    if (baselineInference.mode !== optimizedInference.mode) {
+      [baselineInference, optimizedInference] = await Promise.all([
+        executeInference(
+          scenario,
+          input.objective,
+          compile,
+          retrieval.memories,
+          compile.baseline,
+          "baseline",
+          true,
+        ),
+        executeInference(
+          scenario,
+          input.objective,
+          compile,
+          retrieval.memories,
+          compile.selected,
+          "optimized",
+          true,
+        ),
+      ]);
+    }
     send({
       type: "baseline.completed",
       phase: "inference",
@@ -188,15 +232,6 @@ app.post("/api/run", async (request, response) => {
       data: { answer: baselineInference.answer, usage: baselineInference.usage, mode: baselineInference.mode },
     });
     await pause(90);
-
-    const optimizedInference = await executeInference(
-      scenario,
-      input.objective,
-      compile,
-      retrieval.memories,
-      compile.selected,
-      "optimized",
-    );
     send({
       type: "optimized.completed",
       phase: "inference",
@@ -243,6 +278,12 @@ app.post("/api/run", async (request, response) => {
         .filter((check) => check.label === "Memory policy" || check.label === "Required facts")
         .every((check) => check.passed),
       sameModel: compile.selected.modelId === compile.baseline.modelId,
+      modelId: process.env.TOKENOS_FORCE_MODEL || compile.selected.modelId,
+      measurementMode: optimizedInference.mode,
+      generationConfig: {
+        temperature: CORTEX_GENERATION_CONFIG.temperature,
+        maxCompletionTokens: CORTEX_GENERATION_CONFIG.maxCompletionTokens,
+      },
     };
 
     send({
@@ -282,8 +323,11 @@ app.post("/api/run", async (request, response) => {
         ? baselineInference.answer
         : optimizedInference.answer;
       const answerChanged = execution.answer.trim() !== sourceAnswer.trim();
+      const policyPassed = evaluation.checks.find((check) => check.label === "Memory policy")?.passed ?? false;
+      const requiredFactsPreserved = evaluation.checks.find((check) => check.label === "Required facts")?.passed ?? false;
       const outcomeChanged =
-        !evaluation.policyPassed ||
+        !policyPassed ||
+        !requiredFactsPreserved ||
         answerChanged ||
         Math.abs(counterfactual.expectedQualityDelta) >= 0.015;
       const detail = counterfactual.role === "pinned"
@@ -297,8 +341,10 @@ app.post("/api/run", async (request, response) => {
         role: counterfactual.role,
         promptTokens: execution.usage.promptTokens,
         qualityDelta: counterfactual.expectedQualityDelta,
-        policyPassed: evaluation.policyPassed,
+        policyPassed,
+        requiredFactsPreserved,
         outcomeChanged,
+        mode: execution.mode,
         detail,
       });
     }
