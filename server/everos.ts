@@ -1,5 +1,5 @@
-import type { MemoryCandidate, ProviderMode, Scenario } from "../shared/contracts.ts";
-import type { LearningReceipt } from "../shared/raven-contract.ts";
+import type { MemoryCandidate, ProviderMode, Scenario } from "../shared/contracts.js";
+import type { LearningReceipt } from "../shared/raven-contract.js";
 
 const DEFAULT_BASE_URL = "https://api.evermind.ai";
 const MAX_CANDIDATES = 15;

@@ -1,7 +1,7 @@
 import { appendFile, mkdir, readFile } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
-import type { LocalRunLedgerStatus } from "../shared/raven-contract.ts";
-import type { LearnedMemorySignal } from "./everos.ts";
+import type { LocalRunLedgerStatus } from "../shared/raven-contract.js";
+import type { LearnedMemorySignal } from "./everos.js";
 
 export type LocalRunEvidence = {
   runId: string;

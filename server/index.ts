@@ -1,8 +1,8 @@
 import "dotenv/config";
 import express from "express";
 import { pathToFileURL } from "node:url";
-import { scenarios } from "../shared/catalog.ts";
-import type { CounterfactualResult, Evaluation, Scenario } from "../shared/contracts.ts";
+import { scenarios } from "../shared/catalog.js";
+import type { CounterfactualResult, Evaluation, Scenario } from "../shared/contracts.js";
 import type {
   LearningReceipt,
   RavenComparison,
@@ -11,16 +11,16 @@ import type {
   RavenRunRequest,
   RavenRunResult,
   SafeBudgetRefusal,
-} from "../shared/raven-contract.ts";
-import { evaluateRavenRun } from "./evaluator.ts";
-import { retrieveEverOSMemories, writeRavenCaseToEverOS } from "./everos.ts";
-import { persistLocalRun, readLearnedMemorySignals } from "./ledger.ts";
-import { compileMemoryPortfolio, connectMemoryGraph } from "./optimizer.ts";
+} from "../shared/raven-contract.js";
+import { evaluateRavenRun } from "./evaluator.js";
+import { retrieveEverOSMemories, writeRavenCaseToEverOS } from "./everos.js";
+import { persistLocalRun, readLearnedMemorySignals } from "./ledger.js";
+import { compileMemoryPortfolio, connectMemoryGraph } from "./optimizer.js";
 import {
   buildExecutionContract,
   executeRaven,
   getRavenProviderStatus,
-} from "./raven.ts";
+} from "./raven.js";
 
 export const app = express();
 const port = Number(process.env.PORT ?? 8787);

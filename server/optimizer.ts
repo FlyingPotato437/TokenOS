@@ -5,8 +5,8 @@ import type {
   MemoryRelationship,
   PlanCandidate,
   Scenario,
-} from "../shared/contracts.ts";
-import type { MemoryGovernorConstraints } from "../shared/raven-contract.ts";
+} from "../shared/contracts.js";
+import type { MemoryGovernorConstraints } from "../shared/raven-contract.js";
 
 const PROMPT_OVERHEAD_TOKENS = 320;
 const RAVEN_MODEL_ID = "raven-configured-model";
@@ -250,7 +250,8 @@ function buildCounterfactualPlans(
     )[0];
   const rejected = rejectedMemories
     .filter((memory) => memory.relevance < 0.35)
-    .sort((left, right) => left.relevance - right.relevance)[0] ?? rejectedMemories.at(-1);
+    .sort((left, right) => left.relevance - right.relevance)[0] ??
+    rejectedMemories[rejectedMemories.length - 1];
   const chosen = [
     pinned && { memory: pinned, role: "pinned" as const, source: selected },
     causal && { memory: causal, role: "selected" as const, source: selected },

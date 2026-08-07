@@ -5,12 +5,12 @@ import { constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import type { MemoryCandidate, PlanCandidate, Scenario } from "../shared/contracts.ts";
+import type { MemoryCandidate, PlanCandidate, Scenario } from "../shared/contracts.js";
 import type {
   RavenExecutionContract,
   RavenProviderStatus,
   RavenUsage,
-} from "../shared/raven-contract.ts";
+} from "../shared/raven-contract.js";
 
 const execFileAsync = promisify(execFile);
 const ANSI_PATTERN = new RegExp(String.raw`\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])`, "g");

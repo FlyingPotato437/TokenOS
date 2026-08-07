@@ -2,7 +2,7 @@ import { readdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 
-const ignored = new Set([".git", "node_modules", "dist", ".tokenos"]);
+const ignored = new Set([".git", "node_modules", "dist", ".tokenos", ".vercel"]);
 const forbidden = [`Snow${"flake"}`, `Cor${"tex"}`];
 
 async function files(directory) {

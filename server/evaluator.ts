@@ -1,4 +1,4 @@
-import type { CompileResult, Evaluation, PlanCandidate, Scenario } from "../shared/contracts.ts";
+import type { CompileResult, Evaluation, PlanCandidate, Scenario } from "../shared/contracts.js";
 
 function answerRespectsScenarioPolicy(scenario: Scenario, answer: string) {
   const normalized = answer.toLowerCase();

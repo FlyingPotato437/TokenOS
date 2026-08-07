@@ -1,4 +1,4 @@
-import type { Scenario } from "./contracts.ts";
+import type { Scenario } from "./contracts.js";
 
 export const scenarios: Scenario[] = [
   {

@@ -5,7 +5,7 @@ import type {
   MemoryCandidate,
   ProviderMode,
   Strategy,
-} from "./contracts.ts";
+} from "./contracts.js";
 
 export type MemoryGovernorConstraints = {
   maxMemoryTokens: number;
