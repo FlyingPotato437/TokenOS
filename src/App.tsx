@@ -89,9 +89,9 @@ const decisionLabels: Record<DisplayDecision, string> = {
 };
 
 const strategyLabels: Record<Strategy, string> = {
-  economy: "Smallest context",
+  economy: "Lean context",
   balanced: "Balanced",
-  quality: "Highest expected quality",
+  quality: "Quality first",
 };
 
 const scenarioQualityFloors: Record<string, number> = {
@@ -478,12 +478,12 @@ function ComparisonProof({ comparison }: { comparison: RavenComparison | null })
             </tr>
           </thead>
           <tbody>
-            <tr><th scope="row">Memories loaded</th><td>{whole(uncontrolled.memoriesLoaded)}</td><td className="governed-value">{whole(governed.memoriesLoaded)}</td></tr>
-            <tr><th scope="row">Input tokens</th><td>{whole(uncontrolled.usage.inputTokens)}</td><td className="governed-value">{whole(governed.usage.inputTokens)}</td></tr>
-            <tr><th scope="row">Output tokens</th><td>{whole(uncontrolled.usage.outputTokens)}</td><td className="governed-value">{whole(governed.usage.outputTokens)}</td></tr>
-            <tr className="total-row"><th scope="row">Total tokens</th><td>{whole(uncontrolled.usage.totalTokens)}</td><td className="governed-value">{whole(governed.usage.totalTokens)}</td></tr>
-            <tr><th scope="row">Required facts</th><td>{passCopy(requiredFactsPassed(uncontrolled.evaluation))}</td><td>{passCopy(requiredFactsPassed(governed.evaluation))}</td></tr>
-            <tr><th scope="row">Policy result</th><td>{passCopy(uncontrolled.evaluation.policyPassed)}</td><td>{passCopy(governed.evaluation.policyPassed)}</td></tr>
+            <tr><th scope="row">Memories loaded</th><td data-label="All memory">{whole(uncontrolled.memoriesLoaded)}</td><td className="governed-value" data-label="TokenOS governed">{whole(governed.memoriesLoaded)}</td></tr>
+            <tr><th scope="row">Input tokens</th><td data-label="All memory">{whole(uncontrolled.usage.inputTokens)}</td><td className="governed-value" data-label="TokenOS governed">{whole(governed.usage.inputTokens)}</td></tr>
+            <tr><th scope="row">Output tokens</th><td data-label="All memory">{whole(uncontrolled.usage.outputTokens)}</td><td className="governed-value" data-label="TokenOS governed">{whole(governed.usage.outputTokens)}</td></tr>
+            <tr className="total-row"><th scope="row">Total tokens</th><td data-label="All memory">{whole(uncontrolled.usage.totalTokens)}</td><td className="governed-value" data-label="TokenOS governed">{whole(governed.usage.totalTokens)}</td></tr>
+            <tr><th scope="row">Required facts</th><td data-label="All memory">{passCopy(requiredFactsPassed(uncontrolled.evaluation))}</td><td data-label="TokenOS governed">{passCopy(requiredFactsPassed(governed.evaluation))}</td></tr>
+            <tr><th scope="row">Policy result</th><td data-label="All memory">{passCopy(uncontrolled.evaluation.policyPassed)}</td><td data-label="TokenOS governed">{passCopy(governed.evaluation.policyPassed)}</td></tr>
           </tbody>
         </table>
       </div>
