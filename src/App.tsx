@@ -6,7 +6,6 @@ import {
   CaretDown,
   ChartLineUp,
   Check,
-  CheckCircle,
   CirclesThreePlus,
   Database,
   Flask,
@@ -19,7 +18,6 @@ import {
   ShieldCheck,
   Snowflake,
   Stack,
-  Target,
   TrendDown,
   Warning,
 } from "@phosphor-icons/react";
@@ -202,6 +200,30 @@ function SavingsProof({ comparison }: { comparison: ExecutionComparison | null }
   );
 }
 
+function MemoryBidCard({ memory, index }: { memory: MemoryCandidate; index: number }) {
+  return (
+    <motion.article
+      className={`memory-bid ${memory.selected ? "selected" : "rejected"} ${memory.decisionCode ?? ""}`}
+      initial={{ opacity: 0, y: 8 }}
+      animate={{ opacity: 1, y: 0 }}
+      transition={{ delay: index * 0.025, ease: [0.16, 1, 0.3, 1] }}
+    >
+      <div className="memory-meta">
+        <span>{memory.type.replace("_", " ")}</span>
+        <b>{memory.tokens} TOK</b>
+        <strong>{memory.decisionCode === "pinned" ? "PINNED" : memory.selected ? "BOUGHT" : "REJECTED"}</strong>
+      </div>
+      <p>{memory.content}</p>
+      <div className="memory-economics">
+        <span><b>{memory.utilityPer1k?.toFixed(2) ?? "-"}</b> utility / 1K</span>
+        <span><b>{percent(memory.relevance)}</b> relevance</span>
+        <span><b>{percent(memory.confidence)}</b> confidence</span>
+      </div>
+      {memory.decision && <small>{memory.decision}</small>}
+    </motion.article>
+  );
+}
+
 function MemoryAuction({
   compile,
   liveMemories,
@@ -212,6 +234,12 @@ function MemoryAuction({
   const memories = compile?.memories ?? liveMemories;
   const selectedCount = compile?.selected.memoryIds.length ?? 0;
   const tokenCount = compile?.selected.memoryTokens ?? 0;
+  const orderedMemories = [
+    ...memories.filter((memory) => memory.selected),
+    ...memories.filter((memory) => !memory.selected),
+  ];
+  const visibleMemories = orderedMemories.slice(0, 6);
+  const ledgerMemories = orderedMemories.slice(6);
 
   return (
     <section className="surface-panel memory-auction">
@@ -232,30 +260,22 @@ function MemoryAuction({
           <div><strong>Waiting for EverOS.</strong><p>Fifteen candidate memories will enter the compiler.</p></div>
         </div>
       ) : (
-        <div className="memory-grid">
-          {memories.map((memory, index) => (
-            <motion.article
-              className={`memory-bid ${memory.selected ? "selected" : "rejected"} ${memory.decisionCode ?? ""}`}
-              key={memory.id}
-              initial={{ opacity: 0, y: 8 }}
-              animate={{ opacity: 1, y: 0 }}
-              transition={{ delay: index * 0.025, ease: [0.16, 1, 0.3, 1] }}
-            >
-              <div className="memory-meta">
-                <span>{memory.type.replace("_", " ")}</span>
-                <b>{memory.tokens} TOK</b>
-                <strong>{memory.decisionCode === "pinned" ? "PINNED" : memory.selected ? "BOUGHT" : "REJECTED"}</strong>
+        <>
+          <div className="memory-grid">
+            {visibleMemories.map((memory, index) => <MemoryBidCard key={memory.id} memory={memory} index={index} />)}
+          </div>
+          {ledgerMemories.length > 0 && (
+            <details className="memory-overflow">
+              <summary>
+                <span><b>REJECTED AUCTION LEDGER</b>{ledgerMemories.length} lower-value memories remain inspectable</span>
+                <strong>SHOW ALL CANDIDATES <CaretDown size={14} /></strong>
+              </summary>
+              <div className="memory-grid overflow-grid">
+                {ledgerMemories.map((memory, index) => <MemoryBidCard key={memory.id} memory={memory} index={index + visibleMemories.length} />)}
               </div>
-              <p>{memory.content}</p>
-              <div className="memory-economics">
-                <span><b>{memory.utilityPer1k?.toFixed(2) ?? "-"}</b> utility / 1K</span>
-                <span><b>{percent(memory.relevance)}</b> relevance</span>
-                <span><b>{percent(memory.confidence)}</b> confidence</span>
-              </div>
-              {memory.decision && <small>{memory.decision}</small>}
-            </motion.article>
-          ))}
-        </div>
+            </details>
+          )}
+        </>
       )}
     </section>
   );
@@ -424,7 +444,6 @@ function App() {
   const [liveMemories, setLiveMemories] = useState<MemoryCandidate[]>([]);
   const [compile, setCompile] = useState<CompileResult | null>(null);
   const [answer, setAnswer] = useState("");
-  const [usage, setUsage] = useState<RunUsage | null>(null);
   const [evaluation, setEvaluation] = useState<Evaluation | null>(null);
   const [comparison, setComparison] = useState<ExecutionComparison | null>(null);
   const [counterfactuals, setCounterfactuals] = useState<CounterfactualResult[]>([]);
@@ -455,7 +474,6 @@ function App() {
     setLiveMemories([]);
     setCompile(null);
     setAnswer("");
-    setUsage(null);
     setEvaluation(null);
     setComparison(null);
     setCounterfactuals([]);
@@ -488,7 +506,6 @@ function App() {
     if (event.type === "optimized.completed") {
       const data = event.data as { answer: string; usage: RunUsage; mode: ProviderStatus["snowflake"] };
       setAnswer(data.answer);
-      setUsage(data.usage);
       setProviders((current) => ({ ...current, snowflake: data.mode }));
     }
     if (event.type === "inference.completed") {
@@ -501,7 +518,6 @@ function App() {
       const result = event.data as RunResult;
       setCompile(result.compile);
       setAnswer(result.answer);
-      setUsage(result.usage);
       setEvaluation(result.evaluation);
       setComparison(result.comparison);
       setCounterfactuals(result.counterfactuals);
@@ -642,7 +658,9 @@ function App() {
                   <div><span>COMPILED AGENT OUTPUT</span><h2>{answer ? "The purchased context produced this decision." : "The optimized answer will appear here."}</h2></div>
                   {evaluation && <div className="outcome-score"><b>{percent(evaluation.score)}</b><small>OUTCOME SCORE</small></div>}
                 </div>
-                {answer ? <motion.div className="answer-body" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>{formatAnswer(answer)}</motion.div> : (
+                {answer ? <motion.div className="answer-body" initial={{ opacity: 0, y: 10 }} animate={{ opacity: 1, y: 0 }}>{formatAnswer(answer)}</motion.div> : runState === "running" ? (
+                  <div className="answer-loading"><i /><i /><i /><span>Waiting for the compiled Cortex response</span></div>
+                ) : (
                   <div className="technical-empty answer-empty"><Lightning size={24} /><div><strong>One run creates five pieces of evidence.</strong><p>Baseline, optimized context, token delta, safety result, and counterfactual ablations.</p></div></div>
                 )}
               </section>
@@ -653,12 +671,14 @@ function App() {
               <CompilerProof compile={compile} />
               <RelationshipProof compile={compile} />
               <PolicyProof evaluation={evaluation} />
-              <section className="event-console" aria-label="Recent compiler events">
-                <div><span>EVENT STREAM</span><b>{events.length} EVENTS</b></div>
-                {eventLog.length ? eventLog.map((event, index) => (
-                  <p key={`${event.type}-${event.progress}-${index}`}><span>{String(Math.round(event.progress * 100)).padStart(3, "0")}</span>{event.message}</p>
-                )) : <p><span>000</span>Waiting for a compiler run.</p>}
-              </section>
+              <details className="event-console" open={runState === "running"}>
+                <summary><span>EXECUTION TRACE</span><b>{events.length} EVENTS</b></summary>
+                <div className="event-log" aria-label="Recent compiler events">
+                  {eventLog.length ? eventLog.map((event, index) => (
+                    <p key={`${event.type}-${event.progress}-${index}`}><span>{String(Math.round(event.progress * 100)).padStart(3, "0")}</span>{event.message}</p>
+                  )) : <p><span>000</span>Waiting for a compiler run.</p>}
+                </div>
+              </details>
             </aside>
           </div>
         </section>
