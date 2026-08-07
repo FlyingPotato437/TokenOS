@@ -12,6 +12,7 @@
     "test": "tsx --test --test-concurrency=1 server/*.test.ts",
     "check": "npm run lint && npm run test && npm run build",
     "preview": "vite preview",
+    "smoke": "node scripts/smoke.mjs",
     "start": "tsx server/index.ts"
   },
   "dependencies": {
