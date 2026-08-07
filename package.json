@@ -9,8 +9,9 @@
     "dev:api": "tsx watch server/index.ts",
     "build": "tsc -b && tsc --noEmit -p tsconfig.server.json && vite build",
     "lint": "eslint .",
-    "test": "tsx --test --test-concurrency=1 server/*.test.ts",
-    "check": "npm run lint && npm run test && npm run build",
+    "test": "tsx --test --test-concurrency=1 server/*.test.ts tests/*.test.ts",
+    "check:vocabulary": "node scripts/check-vocabulary.mjs",
+    "check": "npm run check:vocabulary && npm run lint && npm run test && npm run build && npm run smoke",
     "preview": "vite preview",
     "smoke": "node scripts/smoke.mjs",
     "start": "tsx server/index.ts"

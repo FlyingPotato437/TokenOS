@@ -26,11 +26,13 @@ const standardRequest: RavenRunRequest = {
 };
 
 const environmentKeys = [
+  "EVEROS_MODE",
   "EVEROS_API_KEY",
   "EVEROS_BASE_URL",
   "EVEROS_USER_ID",
   "EVEROS_AGENT_ID",
   "RAVEN_COMMAND",
+  "RAVEN_MODE",
   "TOKENOS_LEDGER_PATH",
 ] as const;
 const originalEnvironment = Object.fromEntries(environmentKeys.map((key) => [key, process.env[key]]));
@@ -51,6 +53,8 @@ async function run(input: RavenRunRequest) {
 before(async () => {
   environmentKeys.forEach((key) => delete process.env[key]);
   process.env.RAVEN_COMMAND = "/definitely/not/a/raven/binary";
+  process.env.EVEROS_MODE = "replay";
+  process.env.RAVEN_MODE = "replay";
   process.env.TOKENOS_LEDGER_PATH = ":memory:";
   resetMemoryLedger();
   recentRuns.length = 0;
@@ -90,8 +94,8 @@ test("health exposes EverOS and Raven without a model-routing provider", async (
 
   assert.equal(health.ok, true);
   assert.equal(health.service, "tokenos-raven-memory-governor");
-  assert.equal(health.providers.everos, "demo");
-  assert.equal(health.providers.raven, "demo");
+  assert.equal(health.providers.everos, "replay");
+  assert.equal(health.providers.raven, "replay");
   assert.deepEqual(Object.keys(health.providers).sort(), ["everos", "message", "raven"]);
   assert.deepEqual(scenarioList.map((scenario) => scenario.id), ["incident", "support", "fraud"]);
 });

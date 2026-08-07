@@ -48,8 +48,8 @@ const fallbackScenarios: ScenarioSummary[] = localScenarios.map(
 );
 
 const defaultProviders: RavenProviderStatus = {
-  everos: "demo",
-  raven: "demo",
+  everos: "replay",
+  raven: "replay",
   message: "EverOS retrieval and Raven execution are available as deterministic replay.",
 };
 
@@ -65,6 +65,8 @@ const pipeline = [
 const decisionOrder = [
   "pinned",
   "learned_case",
+  "dependency",
+  "complement",
   "selected",
   "redundant",
   "contradiction",
@@ -78,6 +80,8 @@ type DisplayDecision = (typeof decisionOrder)[number];
 const decisionLabels: Record<DisplayDecision, string> = {
   pinned: "Pinned",
   learned_case: "Learned Raven agent case",
+  dependency: "Dependency decision",
+  complement: "Complement decision",
   selected: "Purchased",
   redundant: "Rejected as redundant",
   contradiction: "Rejected as contradictory",
@@ -98,8 +102,8 @@ const points = (value: number) => `${value >= 0 ? "+" : ""}${value.toFixed(2)}`;
 
 function providerCopy(label: "EverOS" | "Raven", mode: RavenProviderStatus["everos"]) {
   if (mode === "live") return `${label} live`;
-  if (mode === "fallback") return `${label} fallback`;
-  return label === "Raven" ? "Raven replay" : "EverOS demo";
+  if (mode === "mixed") return `${label} mixed`;
+  return `${label} replay`;
 }
 
 function ProviderBadge({
@@ -309,6 +313,8 @@ function displayDecision(memory: MemoryCandidate): DisplayDecision {
   if (memory.selected && memory.policyCritical) return "pinned";
   if (memory.selected && (memory.type === "agent_case" || memory.type === "agent_skill")) return "learned_case";
   if (memory.selected) return "selected";
+  if (memory.decisionCode === "dependency") return "dependency";
+  if (memory.decisionCode === "complement") return "complement";
   if (memory.decisionCode === "contradiction") return "contradiction";
   if (memory.decisionCode === "redundant") return "redundant";
   if (memory.decisionCode === "stale") return "stale";
@@ -478,10 +484,10 @@ function SafetyProof({
         {refusal.missingPolicyMemoryIds.length > 0 && (
           <p className="missing-proof"><Warning size={18} /> Missing policy memories: {refusal.missingPolicyMemoryIds.join(", ")}</p>
         )}
-        <button className="primary-action floor-action" type="button" onClick={onApplyFloor} disabled={applied}>
-          {applied ? <><Check size={19} weight="bold" /> SAFE BUDGET APPLIED</> : <><ShieldCheck size={20} weight="bold" /> APPLY {whole(refusal.minimumSafeBudget)}-TOKEN SAFE BUDGET</>}
+        <button className="primary-action floor-action" type="button" onClick={onApplyFloor}>
+          <><ShieldCheck size={20} weight="bold" /> APPLY + RERUN {whole(refusal.minimumSafeBudget)}-TOKEN SAFE BUDGET</>
         </button>
-        {applied && <p className="recovery-copy">Budget restored. Use <b>RUN RAVEN A/B PROOF</b> to rerun successfully.</p>}
+        {applied && <p className="recovery-copy">The safe floor is applied; rerun recovery starts automatically.</p>}
       </div>
     );
   }
@@ -693,8 +699,8 @@ export default function App() {
     setError("");
   };
 
-  const runProof = async () => {
-    const exactBudget = Math.round(memoryBudget);
+  const runProof = async (budgetOverride?: number) => {
+    const exactBudget = Math.round(budgetOverride ?? memoryBudget);
     if (!selectedScenario || !objective.trim()) {
       setStatus("error");
       setError("Choose a Raven task and enter an objective before running the proof.");
@@ -755,12 +761,13 @@ export default function App() {
 
   const applySafeFloor = () => {
     if (!refusal) return;
-    setMemoryBudget(refusal.minimumSafeBudget);
-    window.requestAnimationFrame(() => runButtonRef.current?.focus());
+    const safeBudget = refusal.minimumSafeBudget;
+    setMemoryBudget(safeBudget);
+    void runProof(safeBudget);
   };
 
   const latestEvent = events.at(-1);
-  const replayMode = providers.raven !== "live" || comparison?.measurementMode === "demo";
+  const replayMode = providers.raven !== "live" || comparison?.measurementMode === "replay";
 
   return (
     <div id="top" className="app-shell">

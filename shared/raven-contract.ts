@@ -39,6 +39,7 @@ export type RavenExecutionVariant = {
   memoryTokens: number;
   usage: RavenUsage;
   evaluation: Evaluation;
+  executionContract: RavenExecutionContract;
 };
 
 export type RavenComparison = {
@@ -51,28 +52,30 @@ export type RavenComparison = {
   sameModel: boolean;
   sameTask: boolean;
   sameTools: boolean;
+  sameSettings: boolean;
   executionContract: RavenExecutionContract;
-  measurementMode: ProviderMode;
+  measurementMode: "live" | "replay";
 };
 
 export type RavenProviderStatus = {
   everos: ProviderMode;
-  raven: ProviderMode;
+  raven: "live" | "replay";
   message: string;
 };
 
 export type LearningReceipt = {
-  mode: "everos" | "local" | "fallback";
+  mode: "everos" | "local" | "mixed";
   written: boolean;
-  agentCaseId?: string;
+  agentCaseId: string;
   lesson: string;
   historicalLiftApplied: boolean;
   detail: string;
 };
 
 export type LocalRunLedgerStatus = {
-  mode: "disk" | "memory" | "fallback";
-  entryId?: string;
+  mode: "disk" | "memory";
+  entryId: string;
+  path: string;
   detail: string;
 };
 
@@ -98,7 +101,9 @@ export type SafeBudgetRefusal = {
   objective: string;
   requestedBudget: number;
   minimumSafeBudget: number;
+  minimumSafeMemoryIds: string[];
   missingPolicyMemoryIds: string[];
+  missingRequiredFacts: string[];
   message: string;
   createdAt: string;
 };
@@ -111,14 +116,7 @@ export type RavenRunRequest = {
   constraints: MemoryGovernorConstraints;
 };
 
-export type RavenPipelinePhase =
-  | "init"
-  | "recall"
-  | "price"
-  | "connect"
-  | "compile"
-  | "execute"
-  | "learn";
+export type RavenPipelinePhase = "init" | "recall" | "price" | "connect" | "compile" | "execute" | "learn";
 
 export type RavenRunEventType =
   | "run.started"
@@ -150,3 +148,20 @@ export type MemoryAuctionCandidate = MemoryCandidate & {
   historicalOutcomeLift?: number;
   learnedCaseId?: string;
 };
+
+export const RAVEN_SUCCESS_EVENT_ORDER: RavenRunEventType[] = [
+  "run.started",
+  "recall.started",
+  "recall.completed",
+  "price.completed",
+  "connect.completed",
+  "compile.started",
+  "compile.completed",
+  "raven.started",
+  "uncontrolled.completed",
+  "governed.completed",
+  "comparison.completed",
+  "learn.started",
+  "learn.completed",
+  "run.completed",
+];

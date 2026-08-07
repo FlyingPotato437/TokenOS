@@ -1,40 +1,4 @@
-import type { ModelOption, Scenario } from "./contracts.ts";
-
-export const modelCatalog: ModelOption[] = [
-  {
-    id: "openai-gpt-5-nano",
-    name: "OpenAI GPT-5 Nano",
-    shortName: "GPT-5 Nano",
-    inputCreditsPerMillion: 0.03,
-    outputCreditsPerMillion: 0.22,
-    reliability: 0.72,
-    latencyMs: 430,
-    expectedOutputTokens: 260,
-    regions: ["ANY_REGION", "AWS_US", "AWS_EU"],
-  },
-  {
-    id: "openai-gpt-5-mini",
-    name: "OpenAI GPT-5 Mini",
-    shortName: "GPT-5 Mini",
-    inputCreditsPerMillion: 0.125,
-    outputCreditsPerMillion: 1,
-    reliability: 0.855,
-    latencyMs: 720,
-    expectedOutputTokens: 340,
-    regions: ["ANY_REGION", "AWS_US", "AWS_EU"],
-  },
-  {
-    id: "claude-sonnet-4-6",
-    name: "Claude Sonnet 4.6",
-    shortName: "Sonnet 4.6",
-    inputCreditsPerMillion: 1.5,
-    outputCreditsPerMillion: 7.5,
-    reliability: 0.95,
-    latencyMs: 1180,
-    expectedOutputTokens: 430,
-    regions: ["ANY_REGION", "AWS_US", "AWS_EU"],
-  },
-];
+import type { Scenario } from "./contracts.ts";
 
 export const scenarios: Scenario[] = [
   {
@@ -140,6 +104,7 @@ export const scenarios: Scenario[] = [
         relevance: 0.17,
         confidence: 0.83,
         successLift: 0.006,
+        recency: 0.12,
       },
       {
         id: "inc-policy-copy",

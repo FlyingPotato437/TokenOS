@@ -279,10 +279,13 @@ function relationshipWithSelected(
   selectedIds: Set<string>,
   relationships: MemoryRelationship[],
 ) {
-  return relationships.find((edge) =>
+  const connected = relationships.filter((edge) =>
     (edge.sourceId === memoryId && selectedIds.has(edge.targetId)) ||
     (edge.targetId === memoryId && selectedIds.has(edge.sourceId)),
   );
+  return connected.find((edge) => edge.sourceId === memoryId && edge.type === "depends_on") ??
+    connected.find((edge) => edge.type === "complements") ??
+    connected[0];
 }
 
 function annotateMemories(
@@ -294,6 +297,11 @@ function annotateMemories(
   return memories.map((memory) => {
     const selectedMemory = selectedIds.has(memory.id);
     const relation = relationshipWithSelected(memory.id, selectedIds, relationships);
+    const missingDependency = relationships.find((edge) =>
+      edge.sourceId === memory.id &&
+      edge.type === "depends_on" &&
+      !selectedIds.has(edge.targetId),
+    );
     const utility =
       ((memory.successLift + (memory.historicalOutcomeLift ?? 0)) *
         memory.relevance *
@@ -305,7 +313,11 @@ function annotateMemories(
         ? "pinned" as const
         : (memory.historicalOutcomeLift ?? 0) > 0.04
           ? "learned_case" as const
-          : "selected" as const;
+          : relation?.type === "depends_on"
+            ? "dependency" as const
+            : relation?.type === "complements"
+              ? "complement" as const
+              : "selected" as const;
       return {
         ...memory,
         selected: true,
@@ -315,6 +327,10 @@ function annotateMemories(
           ? "Pinned: required safety policy."
           : decisionCode === "learned_case"
             ? "Selected: a successful prior Raven case increased expected outcome value."
+            : decisionCode === "dependency"
+              ? `Selected with required dependency ${relation?.targetId ?? relation?.sourceId} present.`
+              : decisionCode === "complement"
+                ? "Selected: complementary memory increases joint outcome value."
             : "Selected: high marginal outcome value per token.",
       };
     }
@@ -322,6 +338,8 @@ function annotateMemories(
       ? "contradiction" as const
       : relation?.type === "duplicate"
         ? "redundant" as const
+        : missingDependency
+          ? "dependency" as const
         : (memory.recency ?? 0.7) < 0.3
           ? "stale" as const
           : memory.relevance < 0.3
@@ -336,6 +354,8 @@ function annotateMemories(
         ? "Rejected: conflicts with selected safety context."
         : decisionCode === "redundant"
           ? "Rejected: duplicates a higher-value selected memory."
+          : decisionCode === "dependency"
+            ? `Rejected: depends on ${missingDependency?.targetId}, which was not purchased.`
           : decisionCode === "stale"
             ? "Rejected: stale evidence is dominated by newer context."
             : decisionCode === "irrelevant"
@@ -405,6 +425,7 @@ export function compileMemoryPortfolio(
     relationshipEdges: relationships,
     minimumSafeCost: 0,
     minimumSafeMemoryTokens: minimumSafe?.memoryTokens ?? 0,
+    minimumSafeMemoryIds: minimumSafe?.memoryIds ?? [],
     counterfactualPlans: buildCounterfactualPlans(
       candidatesByMemorySet,
       selected,

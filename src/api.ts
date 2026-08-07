@@ -11,7 +11,7 @@ export type ScenarioSummary = Pick<
   "id" | "name" | "tag" | "objective" | "policy" | "tools"
 >;
 
-const providerModes = new Set<ProviderMode>(["demo", "live", "fallback"]);
+const providerModes = new Set<ProviderMode>(["live", "replay", "mixed"]);
 const eventTypes = new Set<RavenRunEventType>([
   "run.started",
   "recall.started",
@@ -32,7 +32,11 @@ const eventTypes = new Set<RavenRunEventType>([
 ]);
 
 function providerMode(value: unknown): ProviderMode {
-  return providerModes.has(value as ProviderMode) ? (value as ProviderMode) : "fallback";
+  return providerModes.has(value as ProviderMode) ? (value as ProviderMode) : "replay";
+}
+
+function ravenMode(value: unknown): RavenProviderStatus["raven"] {
+  return value === "live" ? "live" : "replay";
 }
 
 function parseEvent(line: string): RavenRunEvent {
@@ -82,7 +86,7 @@ export async function getAppData() {
   const scenarios = (await scenariosResponse.json()) as ScenarioSummary[];
   const providers: RavenProviderStatus = {
     everos: providerMode(health.providers?.everos),
-    raven: providerMode(health.providers?.raven),
+    raven: ravenMode(health.providers?.raven),
     message: health.providers?.message ?? "Raven and EverOS provider modes are reported by the runtime.",
   };
 

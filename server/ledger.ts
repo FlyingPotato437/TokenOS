@@ -23,7 +23,7 @@ export type LocalRunEvidence = {
 
 const memoryEntries: LocalRunEvidence[] = [];
 
-function ledgerPath() {
+export function ledgerPath() {
   const configured = process.env.TOKENOS_LEDGER_PATH?.trim() || ".tokenos/run-ledger.jsonl";
   return isAbsolute(configured) ? configured : resolve(process.cwd(), configured);
 }
@@ -99,6 +99,7 @@ export async function persistLocalRun(entry: LocalRunEvidence): Promise<LocalRun
     return {
       mode: "memory",
       entryId: entry.runId,
+      path: "in-process memory",
       detail: "A/B evidence and the successful memory portfolio were retained in the process learning ledger.",
     };
   }
@@ -109,12 +110,14 @@ export async function persistLocalRun(entry: LocalRunEvidence): Promise<LocalRun
     return {
       mode: "disk",
       entryId: entry.runId,
+      path,
       detail: "A/B evidence and the successful memory portfolio were appended to the local TokenOS ledger.",
     };
   } catch (error) {
     return {
-      mode: "fallback",
+      mode: "memory",
       entryId: entry.runId,
+      path: "in-process memory",
       detail: `The disk ledger was unavailable, so evidence remains in memory: ${error instanceof Error ? error.message : "write failed"}.`,
     };
   }

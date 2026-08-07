@@ -1,7 +1,6 @@
 export type Strategy = "economy" | "balanced" | "quality";
-export type Region = "ANY_REGION" | "AWS_US" | "AWS_EU";
 export type MemoryType = "profile" | "episode" | "event" | "agent_case" | "agent_skill" | "policy";
-export type ProviderMode = "demo" | "live" | "fallback";
+export type ProviderMode = "live" | "replay" | "mixed";
 export type MemoryRelationType = "duplicate" | "contradicts" | "depends_on" | "complements";
 
 export type MemoryRelationship = {
@@ -9,15 +8,6 @@ export type MemoryRelationship = {
   targetId: string;
   type: MemoryRelationType;
   strength: number;
-};
-
-export type RunConstraints = {
-  maxCost: number;
-  maxLatencyMs: number;
-  minSuccess: number;
-  strategy: Strategy;
-  region: Region;
-  maxMemoryTokens: number;
 };
 
 export type MemoryCandidate = {
@@ -43,6 +33,7 @@ export type MemoryCandidate = {
     | "selected"
     | "learned_case"
     | "dependency"
+    | "complement"
     | "redundant"
     | "contradiction"
     | "stale"
@@ -54,22 +45,10 @@ export type ToolOption = {
   id: string;
   name: string;
   description: string;
-  estimatedCost: number;
-  latencyMs: number;
-  successLift: number;
   required?: boolean;
-};
-
-export type ModelOption = {
-  id: string;
-  name: string;
-  shortName: string;
-  inputCreditsPerMillion: number;
-  outputCreditsPerMillion: number;
-  reliability: number;
-  latencyMs: number;
-  expectedOutputTokens: number;
-  regions: Region[];
+  estimatedCost?: number;
+  latencyMs?: number;
+  successLift?: number;
 };
 
 export type Scenario = {
@@ -99,6 +78,7 @@ export type PlanCandidate = {
   memoryTokens: number;
   coveredFacts: string[];
   redundancyPenalty: number;
+  relationshipLift?: number;
   score: number;
   feasible: boolean;
   blockers: string[];
@@ -128,55 +108,15 @@ export type CompileResult = {
   relationshipEdges: MemoryRelationship[];
   minimumSafeCost: number;
   minimumSafeMemoryTokens: number;
+  minimumSafeMemoryIds: string[];
   counterfactualPlans: CounterfactualPlan[];
-};
-
-export type ProviderStatus = {
-  everos: ProviderMode;
-  snowflake: ProviderMode;
-  message: string;
-};
-
-export type RunUsage = {
-  promptTokens: number;
-  completionTokens: number;
-  totalTokens: number;
-  actualCost: number;
-  estimated: boolean;
-};
-
-export type Evaluation = {
-  score: number;
-  policyPassed: boolean;
-  checks: Array<{ label: string; passed: boolean; detail: string }>;
-};
-
-export type ExecutionVariant = {
-  answer: string;
-  usage: RunUsage;
-  evaluation: Evaluation;
-};
-
-export type ExecutionComparison = {
-  baseline: ExecutionVariant;
-  optimized: ExecutionVariant;
-  tokenReduction: number;
-  costReduction: number;
-  requiredFactsPreserved: boolean;
-  sameModel: boolean;
-  modelId: string;
-  measurementMode: ProviderMode;
-  generationConfig: {
-    temperature: number;
-    maxCompletionTokens: number;
-  };
 };
 
 export type CounterfactualResult = {
   memoryId: string;
   memoryContent: string;
   role: CounterfactualPlan["role"];
-  promptTokens: number;
+  inputTokens: number;
   qualityDelta: number;
   policyPassed: boolean;
   requiredFactsPreserved: boolean;
@@ -185,50 +125,8 @@ export type CounterfactualResult = {
   detail: string;
 };
 
-export type LedgerStatus = {
-  mode: "local" | "snowflake" | "fallback";
-  detail: string;
-};
-
-export type RunResult = {
-  runId: string;
-  scenarioId: string;
-  objective: string;
-  answer: string;
-  compile: CompileResult;
-  usage: RunUsage;
-  evaluation: Evaluation;
-  comparison: ExecutionComparison;
-  counterfactuals: CounterfactualResult[];
-  providers: ProviderStatus;
-  ledger: LedgerStatus;
-  createdAt: string;
-};
-
-export type RunEvent = {
-  type:
-    | "run.started"
-    | "recall.started"
-    | "recall.completed"
-    | "policy.completed"
-    | "search.started"
-    | "search.completed"
-    | "inference.started"
-    | "baseline.completed"
-    | "optimized.completed"
-    | "inference.completed"
-    | "evaluation.completed"
-    | "counterfactual.completed"
-    | "ledger.completed"
-    | "run.error";
-  phase: "init" | "recall" | "policy" | "search" | "inference" | "evaluation" | "ledger";
-  progress: number;
-  message: string;
-  data?: unknown;
-};
-
-export type RunRequest = {
-  scenarioId: string;
-  objective: string;
-  constraints: RunConstraints;
+export type Evaluation = {
+  score: number;
+  policyPassed: boolean;
+  checks: Array<{ label: string; passed: boolean; detail: string }>;
 };

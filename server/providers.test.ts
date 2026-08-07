@@ -21,11 +21,13 @@ const constraints: MemoryGovernorConstraints = {
   strategy: "balanced",
 };
 const environmentKeys = [
+  "EVEROS_MODE",
   "EVEROS_API_KEY",
   "EVEROS_BASE_URL",
   "EVEROS_USER_ID",
   "EVEROS_AGENT_ID",
   "RAVEN_COMMAND",
+  "RAVEN_MODE",
   "RAVEN_MODEL",
   "RAVEN_WORKSPACE",
   "RAVEN_TIMEOUT_MS",
@@ -54,7 +56,7 @@ test("EverOS replay returns all 15 candidates when credentials are absent", asyn
   clearEnvironment();
   const retrieval = await retrieveEverOSMemories(incident, incident.objective);
 
-  assert.equal(retrieval.mode, "demo");
+  assert.equal(retrieval.mode, "replay");
   assert.equal(retrieval.memories.length, 15);
   assert.equal(retrieval.historicalLiftApplied, false);
 });
@@ -62,6 +64,7 @@ test("EverOS replay returns all 15 candidates when credentials are absent", asyn
 test("live EverOS recall searches user and Raven tracks separately", async () => {
   clearEnvironment();
   process.env.EVEROS_API_KEY = "test-key";
+  process.env.EVEROS_MODE = "live";
   process.env.EVEROS_BASE_URL = "https://everos.example";
   process.env.EVEROS_USER_ID = "user-1";
   process.env.EVEROS_AGENT_ID = "raven-1";
@@ -87,7 +90,7 @@ test("live EverOS recall searches user and Raven tracks separately", async () =>
   const retrieval = await retrieveEverOSMemories(incident, incident.objective);
   const ids = new Set(retrieval.memories.map((memory) => memory.id));
 
-  assert.equal(retrieval.mode, "live");
+  assert.equal(retrieval.mode, "mixed");
   assert.equal(bodies.length, 2);
   assert.equal(bodies.find((body) => body.user_id)?.include_profile, true);
   assert.equal(bodies.find((body) => body.agent_id)?.agent_id, "raven-1");
@@ -104,6 +107,7 @@ test("live EverOS recall searches user and Raven tracks separately", async () =>
 test("successful Raven outcomes are added and flushed for EverOS agent-case extraction", async () => {
   clearEnvironment();
   process.env.EVEROS_API_KEY = "test-key";
+  process.env.EVEROS_MODE = "live";
   process.env.EVEROS_BASE_URL = "https://everos.example";
   process.env.EVEROS_USER_ID = "user-1";
   process.env.EVEROS_AGENT_ID = "raven-1";
@@ -167,6 +171,7 @@ console.log(JSON.stringify({ answer: ${JSON.stringify(incident.demoAnswer)} }));
 `, "utf8");
   await chmod(runner, 0o755);
   process.env.RAVEN_COMMAND = runner;
+  process.env.RAVEN_MODE = "live";
   process.env.RAVEN_MODEL = "openrouter/raven-fixed-test";
 
   const compile = compileMemoryPortfolio(incident, incident.objective, constraints, incident.memories);
@@ -225,7 +230,7 @@ test("Raven replay is explicit and labels token counts as estimates", async () =
     contract,
   });
 
-  assert.equal(result.mode, "demo");
+  assert.equal(result.mode, "replay");
   assert.equal(result.usage.estimated, true);
   assert.equal(result.answer, incident.demoAnswer);
 });

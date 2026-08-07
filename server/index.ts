@@ -58,8 +58,8 @@ function validRunRequest(body: unknown): body is RavenRunRequest {
   const candidate = body as Partial<RavenRunRequest>;
   const constraints = candidate.constraints;
   return Boolean(
-    candidate.scenarioId &&
-    candidate.objective?.trim() &&
+    typeof candidate.scenarioId === "string" && candidate.scenarioId.trim() &&
+    typeof candidate.objective === "string" && candidate.objective.trim() &&
     constraints &&
     Number.isFinite(constraints.maxMemoryTokens) &&
     constraints.maxMemoryTokens > 0 &&
@@ -87,6 +87,7 @@ function executionVariant(
   memoryTokens: number,
   usage: RavenExecutionVariant["usage"],
   evaluation: Evaluation,
+  executionContract: RavenExecutionVariant["executionContract"],
 ): RavenExecutionVariant {
   return {
     kind,
@@ -96,6 +97,7 @@ function executionVariant(
     memoryTokens,
     usage,
     evaluation,
+    executionContract,
   };
 }
 
@@ -119,7 +121,7 @@ function counterfactualEvidence(
       memoryId: counterfactual.memoryId,
       memoryContent: counterfactual.memoryContent,
       role: counterfactual.role,
-      promptTokens: counterfactual.plan.inputTokens,
+      inputTokens: counterfactual.plan.inputTokens,
       qualityDelta: counterfactual.expectedQualityDelta,
       policyPassed,
       requiredFactsPreserved: factsPreserved,
@@ -168,7 +170,7 @@ app.post("/api/run", async (request, response) => {
   const runId = `tok_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 7)}`;
   const createdAt = new Date().toISOString();
   const initialProviders = await getRavenProviderStatus();
-  const demoPace = initialProviders.everos === "demo" && initialProviders.raven === "demo";
+  const demoPace = initialProviders.everos === "replay" && initialProviders.raven === "replay";
   const pause = (milliseconds = 110) =>
     new Promise((resolve) => setTimeout(resolve, demoPace ? milliseconds : 15));
   const send = (event: RavenRunEvent) => {
@@ -256,9 +258,13 @@ app.post("/api/run", async (request, response) => {
         objective: input.objective,
         requestedBudget: input.constraints.maxMemoryTokens,
         minimumSafeBudget: compile.minimumSafeMemoryTokens,
+        minimumSafeMemoryIds: compile.minimumSafeMemoryIds,
         missingPolicyMemoryIds: compile.memories
           .filter((memory) => memory.policyCritical && !compile.selected.memoryIds.includes(memory.id))
           .map((memory) => memory.id),
+        missingRequiredFacts: (scenario.requiredFacts ?? []).filter(
+          (fact) => !compile.selected.coveredFacts.includes(fact),
+        ),
         message: `No safe context can be compiled under this budget. Minimum safe budget: ${compile.minimumSafeMemoryTokens} tokens.`,
         createdAt,
       };
@@ -289,7 +295,7 @@ app.post("/api/run", async (request, response) => {
       message: "Running uncontrolled and governed Raven turns with the same task, model, tools, and generation settings.",
       data: { executionContract: contract },
     });
-    let uncontrolled = await executeRaven({
+    const uncontrolled = await executeRaven({
       runId,
       kind: "uncontrolled",
       scenario,
@@ -298,7 +304,7 @@ app.post("/api/run", async (request, response) => {
       memories: retrieval.memories,
       contract,
     });
-    let governed = await executeRaven({
+    const governed = await executeRaven({
       runId,
       kind: "governed",
       scenario,
@@ -308,28 +314,7 @@ app.post("/api/run", async (request, response) => {
       contract,
     });
     if (uncontrolled.mode !== governed.mode || uncontrolled.model !== governed.model) {
-      [uncontrolled, governed] = await Promise.all([
-        executeRaven({
-          runId,
-          kind: "uncontrolled",
-          scenario,
-          objective: input.objective,
-          plan: compile.baseline,
-          memories: retrieval.memories,
-          contract,
-          forceReplay: true,
-        }),
-        executeRaven({
-          runId,
-          kind: "governed",
-          scenario,
-          objective: input.objective,
-          plan: compile.selected,
-          memories: retrieval.memories,
-          contract,
-          forceReplay: true,
-        }),
-      ]);
+      throw new Error("Controlled Raven A/B execution did not preserve one runtime and model.");
     }
 
     const uncontrolledEvaluation = evaluateRavenRun(
@@ -351,6 +336,7 @@ app.post("/api/run", async (request, response) => {
       compile.baseline.memoryTokens,
       uncontrolled.usage,
       uncontrolledEvaluation,
+      contract,
     );
     const governedVariant = executionVariant(
       "governed",
@@ -359,6 +345,7 @@ app.post("/api/run", async (request, response) => {
       compile.selected.memoryTokens,
       governed.usage,
       governedEvaluation,
+      contract,
     );
     send({
       type: "uncontrolled.completed",
@@ -377,19 +364,23 @@ app.post("/api/run", async (request, response) => {
 
     const measurementMode = uncontrolled.mode === "live" && governed.mode === "live"
       ? "live" as const
-      : uncontrolled.mode === "demo" && governed.mode === "demo"
-        ? "demo" as const
-        : "fallback" as const;
+      : "replay" as const;
     const comparison: RavenComparison = {
       uncontrolled: uncontrolledVariant,
       governed: governedVariant,
       tokenReduction: reduction(governed.usage.inputTokens, uncontrolled.usage.inputTokens),
       memoryTokenReduction: reduction(compile.selected.memoryTokens, compile.baseline.memoryTokens),
       requiredFactsPreserved: requiredFactsPreserved(governedEvaluation),
-      sameRuntime: true,
+      sameRuntime:
+        uncontrolledVariant.executionContract.runtime === governedVariant.executionContract.runtime,
       sameModel: uncontrolled.model === governed.model,
-      sameTask: true,
+      sameTask:
+        uncontrolledVariant.executionContract.taskFingerprint ===
+        governedVariant.executionContract.taskFingerprint,
       sameTools: JSON.stringify(uncontrolled.tools) === JSON.stringify(governed.tools),
+      sameSettings:
+        JSON.stringify(uncontrolledVariant.executionContract.generationConfig) ===
+        JSON.stringify(governedVariant.executionContract.generationConfig),
       executionContract: contract,
       measurementMode,
     };
@@ -440,8 +431,9 @@ app.post("/api/run", async (request, response) => {
       });
     } else {
       learning = {
-        mode: "fallback",
+        mode: "local",
         written: false,
+        agentCaseId: runId,
         lesson,
         historicalLiftApplied: retrieval.historicalLiftApplied,
         detail: "The run failed its policy or required-fact gate, so it was not promoted into EverOS learning.",
@@ -484,11 +476,13 @@ app.post("/api/run", async (request, response) => {
     });
     response.end();
   } catch (error) {
+    const message = error instanceof Error ? error.message : "The Raven memory-governor run failed.";
     send({
       type: "run.error",
       phase: "learn",
       progress: 1,
-      message: error instanceof Error ? error.message : "The Raven memory-governor run failed.",
+      message,
+      data: { runId, error: { message } },
     });
     response.end();
   }

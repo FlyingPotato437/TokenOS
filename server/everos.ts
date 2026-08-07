@@ -204,11 +204,12 @@ export async function retrieveEverOSMemories(
   objective: string,
   historicalSignals: LearnedMemorySignal[] = [],
 ): Promise<EverOSRetrieval> {
-  if (!configured(process.env.EVEROS_API_KEY)) {
+  const liveRequested = process.env.EVEROS_MODE?.trim().toLowerCase() === "live";
+  if (!liveRequested || !configured(process.env.EVEROS_API_KEY)) {
     const boosted = applyHistoricalSignals(scenario.memories, historicalSignals);
     return {
       memories: boosted.memories,
-      mode: "demo",
+      mode: "replay",
       detail: "Using the deterministic EverOS replay across profiles, episodes, Raven cases, and skills.",
       historicalLiftApplied: boosted.applied,
     };
@@ -216,10 +217,12 @@ export async function retrieveEverOSMemories(
 
   const userId = process.env.EVEROS_USER_ID ?? "tokenos-demo-user";
   const agentId = process.env.EVEROS_AGENT_ID ?? "tokenos-raven";
+  const appId = process.env.EVEROS_APP_ID ?? "tokenos";
+  const projectId = process.env.EVEROS_PROJECT_ID ?? "raven-demo";
   try {
     const [userMemories, agentMemories] = await Promise.all([
-      searchTrack({ query: objective, user_id: userId, method: "hybrid", top_k: 12, include_profile: true }),
-      searchTrack({ query: objective, agent_id: agentId, method: "hybrid", top_k: 12 }),
+      searchTrack({ query: objective, user_id: userId, app_id: appId, project_id: projectId, method: "hybrid", top_k: 12, include_profile: true }),
+      searchTrack({ query: objective, agent_id: agentId, app_id: appId, project_id: projectId, method: "hybrid", top_k: 12 }),
     ]);
     const liveMemories = mergeUnique(userMemories, agentMemories);
     if (!liveMemories.length) throw new Error("EverOS returned no usable memory records");
@@ -227,16 +230,16 @@ export async function retrieveEverOSMemories(
     const boosted = applyHistoricalSignals(merged, historicalSignals);
     return {
       memories: boosted.memories,
-      mode: "live",
-      detail: `EverOS returned ${userMemories.length} user memories and ${agentMemories.length} Raven cases or skills.`,
+      mode: "mixed",
+      detail: `EverOS returned ${userMemories.length} user memories and ${agentMemories.length} Raven cases or skills; workspace policy anchors completed the governed set.`,
       historicalLiftApplied: boosted.applied,
     };
   } catch (error) {
     const boosted = applyHistoricalSignals(scenario.memories, historicalSignals);
     return {
       memories: boosted.memories,
-      mode: "fallback",
-      detail: `EverOS replay fallback: ${error instanceof Error ? error.message : "request failed"}.`,
+      mode: "replay",
+      detail: `EverOS live recall failed, so the response is explicitly labeled replay: ${error instanceof Error ? error.message : "request failed"}.`,
       historicalLiftApplied: boosted.applied,
     };
   }
@@ -250,7 +253,8 @@ export async function writeRavenCaseToEverOS(input: {
   selectedMemoryIds: string[];
   historicalLiftApplied: boolean;
 }): Promise<LearningReceipt> {
-  if (!configured(process.env.EVEROS_API_KEY)) {
+  const liveRequested = process.env.EVEROS_MODE?.trim().toLowerCase() === "live";
+  if (!liveRequested || !configured(process.env.EVEROS_API_KEY)) {
     return {
       mode: "local",
       written: true,
@@ -265,6 +269,8 @@ export async function writeRavenCaseToEverOS(input: {
   const baseUrl = (process.env.EVEROS_BASE_URL ?? DEFAULT_BASE_URL).replace(/\/$/, "");
   const userId = process.env.EVEROS_USER_ID ?? "tokenos-demo-user";
   const agentId = process.env.EVEROS_AGENT_ID ?? "tokenos-raven";
+  const appId = process.env.EVEROS_APP_ID ?? "tokenos";
+  const projectId = process.env.EVEROS_PROJECT_ID ?? "raven-demo";
   const sessionId = `tokenos-${input.runId}`;
   const timestamp = Date.now();
   const messages = [
@@ -283,7 +289,15 @@ export async function writeRavenCaseToEverOS(input: {
     const addResponse = await fetch(`${baseUrl}/api/v2/memory/add`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ session_id: sessionId, messages }),
+      body: JSON.stringify({
+        session_id: sessionId,
+        agent_id: agentId,
+        app_id: appId,
+        project_id: projectId,
+        mode: "agent",
+        async_mode: false,
+        messages,
+      }),
       signal: AbortSignal.timeout(20_000),
     });
     if (!addResponse.ok) throw new Error(`add returned ${addResponse.status}`);
@@ -291,7 +305,7 @@ export async function writeRavenCaseToEverOS(input: {
     const flushResponse = await fetch(`${baseUrl}/api/v2/memory/flush`, {
       method: "POST",
       headers,
-      body: JSON.stringify({ session_id: sessionId }),
+      body: JSON.stringify({ session_id: sessionId, agent_id: agentId, app_id: appId, project_id: projectId }),
       signal: AbortSignal.timeout(30_000),
     });
     if (!flushResponse.ok) throw new Error(`flush returned ${flushResponse.status}`);
@@ -305,7 +319,7 @@ export async function writeRavenCaseToEverOS(input: {
     };
   } catch (error) {
     return {
-      mode: "fallback",
+      mode: "local",
       written: true,
       agentCaseId: input.runId,
       lesson: input.lesson,

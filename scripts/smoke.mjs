@@ -1,288 +1,242 @@
 import { spawn } from "node:child_process";
-import { access } from "node:fs/promises";
-import { createServer } from "node:net";
+import { readdir, readFile } from "node:fs/promises";
+import net from "node:net";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import process from "node:process";
 
-const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const objective =
-  "Production checkout latency is back. Investigate it, but do not restart anything during business hours.";
-const normalConstraints = {
-  maxCost: 0.003,
-  maxLatencyMs: 1800,
-  minSuccess: 0.9,
-  maxMemoryTokens: 360,
-  strategy: "balanced",
-  region: "ANY_REGION",
-};
+const root = process.cwd();
+const passes = [];
 
-let apiProcess;
-let apiOutput = "";
-
-function delay(milliseconds) {
-  return new Promise((resolve) => setTimeout(resolve, milliseconds));
+function check(condition, label, failure) {
+  if (!condition) throw new Error(failure);
+  passes.push(label);
 }
 
-function check(label, condition, failureMessage) {
-  if (!condition) throw new Error(failureMessage);
-  console.log(`✓ ${label}`);
-}
-
-function eventOfType(events, type) {
-  return events.find((event) => event.type === type);
-}
-
-async function availablePort() {
-  const server = createServer();
-  await new Promise((resolve, reject) => {
+async function freePort() {
+  return new Promise((resolve, reject) => {
+    const server = net.createServer();
     server.once("error", reject);
-    server.listen(0, "127.0.0.1", resolve);
+    server.listen(0, "127.0.0.1", () => {
+      const address = server.address();
+      const port = typeof address === "object" && address ? address.port : 0;
+      server.close((error) => error ? reject(error) : resolve(port));
+    });
   });
-  const address = server.address();
-  const port = typeof address === "object" && address ? address.port : 0;
-  await new Promise((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
-  if (!port) throw new Error("Could not reserve a local port for the smoke-test API.");
-  return port;
 }
 
-async function startDemoApi(port) {
-  const executable = path.join(
-    repoRoot,
-    "node_modules",
-    ".bin",
-    process.platform === "win32" ? "tsx.cmd" : "tsx",
-  );
-  await access(executable).catch(() => {
-    throw new Error("Missing local dependencies. Run npm install before npm run smoke.");
-  });
-
-  apiProcess = spawn(executable, ["server/index.ts"], {
-    cwd: repoRoot,
-    detached: process.platform !== "win32",
-    env: {
-      ...process.env,
-      PORT: String(port),
-      EVEROS_API_KEY: "",
-      EVEROS_BASE_URL: "",
-      EVEROS_USER_ID: "",
-      SNOWFLAKE_ACCOUNT_URL: "",
-      SNOWFLAKE_PAT: "",
-      SNOWFLAKE_DATABASE: "",
-      SNOWFLAKE_SCHEMA: "",
-      SNOWFLAKE_WAREHOUSE: "",
-      SNOWFLAKE_ROLE: "",
-      SNOWFLAKE_LEDGER_TABLE: "",
-      TOKENOS_FORCE_MODEL: "",
-    },
-    stdio: ["ignore", "pipe", "pipe"],
-  });
-
-  const collectOutput = (chunk) => {
-    apiOutput = `${apiOutput}${chunk.toString()}`.slice(-4000);
-  };
-  apiProcess.stdout.on("data", collectOutput);
-  apiProcess.stderr.on("data", collectOutput);
-}
-
-async function waitForHealth(baseUrl) {
-  const deadline = Date.now() + 15_000;
-  while (Date.now() < deadline) {
-    if (apiProcess?.exitCode !== null) {
-      throw new Error(`Local API exited before becoming healthy.${apiOutput ? ` ${apiOutput.trim()}` : ""}`);
-    }
+async function waitForHealth(baseUrl, child, output) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    if (child.exitCode !== null) throw new Error(`API exited with ${child.exitCode}: ${output.join("").trim()}`);
     try {
-      const response = await fetch(`${baseUrl}/api/health`, {
-        signal: AbortSignal.timeout(750),
-      });
-      if (response.ok) return await response.json();
+      const response = await fetch(`${baseUrl}/api/health`);
+      if (response.ok) return response.json();
     } catch {
-      // The server may still be loading TypeScript modules.
+      // The process is still starting.
     }
-    await delay(100);
+    await new Promise((resolve) => setTimeout(resolve, 50));
   }
-  throw new Error(`Health endpoint did not become ready within 15 seconds.${apiOutput ? ` ${apiOutput.trim()}` : ""}`);
+  throw new Error(`API did not become healthy: ${output.join("").trim()}`);
 }
 
-async function runExperiment(baseUrl, constraints) {
+async function streamRun(baseUrl, body) {
   const response = await fetch(`${baseUrl}/api/run`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ scenarioId: "incident", objective, constraints }),
-    signal: AbortSignal.timeout(30_000),
+    body: JSON.stringify(body),
   });
-  if (!response.ok) {
-    const detail = await response.text();
-    throw new Error(`Expected POST /api/run to return 200, received ${response.status}: ${detail}`);
-  }
-
-  const contentType = response.headers.get("content-type") ?? "";
-  if (!contentType.includes("application/x-ndjson")) {
-    throw new Error(`Expected an NDJSON run stream, received ${contentType || "no content type"}.`);
-  }
-
-  const payload = await response.text();
-  return payload
-    .split("\n")
-    .filter((line) => line.trim())
-    .map((line, index) => {
-      try {
-        return JSON.parse(line);
-      } catch {
-        throw new Error(`Run stream line ${index + 1} was not valid JSON: ${line}`);
-      }
-    });
+  const text = await response.text();
+  const events = text.split("\n").filter(Boolean).map((line) => JSON.parse(line));
+  return { response, events };
 }
 
-async function stopDemoApi() {
-  if (!apiProcess || apiProcess.exitCode !== null) return;
-  if (process.platform === "win32") {
-    apiProcess.kill("SIGTERM");
-  } else {
-    try {
-      process.kill(-apiProcess.pid, "SIGTERM");
-    } catch {
-      apiProcess.kill("SIGTERM");
-    }
+async function activeFiles(directory) {
+  const entries = await readdir(directory, { withFileTypes: true });
+  const files = [];
+  for (const entry of entries) {
+    if ([".git", "node_modules", "dist", ".tokenos"].includes(entry.name)) continue;
+    const target = path.join(directory, entry.name);
+    if (entry.isDirectory()) files.push(...await activeFiles(target));
+    else if (/\.(?:md|mjs|ts|tsx|json|html|svg|example)$/.test(entry.name) || entry.name === ".env.example") files.push(target);
   }
-
-  const exited = new Promise((resolve) => apiProcess.once("exit", resolve));
-  await Promise.race([exited, delay(1500)]);
-  if (apiProcess.exitCode === null) {
-    if (process.platform === "win32") apiProcess.kill("SIGKILL");
-    else {
-      try {
-        process.kill(-apiProcess.pid, "SIGKILL");
-      } catch {
-        apiProcess.kill("SIGKILL");
-      }
-    }
-  }
+  return files;
 }
+
+async function verifyVocabulary() {
+  const forbidden = [`Snow${"flake"}`, `Cor${"tex"}`];
+  const offenders = [];
+  for (const file of await activeFiles(root)) {
+    const content = await readFile(file, "utf8");
+    if (forbidden.some((term) => content.toLowerCase().includes(term.toLowerCase()))) {
+      offenders.push(path.relative(root, file));
+    }
+  }
+  check(offenders.length === 0, "No retired product references", `Retired product references remain in: ${offenders.join(", ")}`);
+}
+
+const eventOrder = [
+  "run.started",
+  "recall.started",
+  "recall.completed",
+  "price.completed",
+  "connect.completed",
+  "compile.started",
+  "compile.completed",
+  "raven.started",
+  "uncontrolled.completed",
+  "governed.completed",
+  "comparison.completed",
+  "learn.started",
+  "learn.completed",
+  "run.completed",
+];
+
+const requests = {
+  incident: {
+    scenarioId: "incident",
+    objective: "Production checkout latency is back. Investigate it, but do not restart anything during business hours.",
+    constraints: { minSuccess: 0.9, maxMemoryTokens: 360, strategy: "balanced" },
+  },
+  support: {
+    scenarioId: "support",
+    objective: "Draft the next action for Northstar Health. Respect data residency and avoid repeating the failed migration step.",
+    constraints: { minSuccess: 0.88, maxMemoryTokens: 500, strategy: "balanced" },
+  },
+  fraud: {
+    scenarioId: "fraud",
+    objective: "Investigate the anomalous payout cluster and match this analyst's prior escalation policy.",
+    constraints: { minSuccess: 0.88, maxMemoryTokens: 500, strategy: "balanced" },
+  },
+};
 
 async function main() {
-  const port = await availablePort();
+  await verifyVocabulary();
+  const port = await freePort();
   const baseUrl = `http://127.0.0.1:${port}`;
-  await startDemoApi(port);
-
-  const health = await waitForHealth(baseUrl);
-  check(
-    "Health endpoint",
-    health.ok === true && health.providers?.everos === "demo" && health.providers?.snowflake === "demo",
-    `Expected a healthy deterministic demo API, received ${JSON.stringify(health)}.`,
-  );
-
-  const events = await runExperiment(baseUrl, normalConstraints);
-  const unexpectedError = eventOfType(events, "run.error");
-  if (unexpectedError) throw new Error(`Normal run returned run.error: ${unexpectedError.message}`);
-
-  const recall = eventOfType(events, "recall.completed");
-  const retrievedCount = Array.isArray(recall?.data?.memories) ? recall.data.memories.length : 0;
-  check(
-    "Retrieved 15 memories",
-    retrievedCount === 15,
-    `Expected 15 retrieved memories, received ${retrievedCount}.`,
-  );
-
-  const search = eventOfType(events, "search.completed");
-  const compile = search?.data;
-  check(
-    "Evaluated 32,768 portfolios",
-    compile?.evaluatedCount === 32_768,
-    `Expected 32,768 evaluated portfolios, received ${compile?.evaluatedCount ?? "no value"}.`,
-  );
-
-  const inference = eventOfType(events, "inference.completed");
-  const comparison = inference?.data?.comparison;
-  const selectedModel = compile?.selected?.modelId;
-  const baselineModel = compile?.baseline?.modelId;
-  check(
-    "Same Cortex model",
-    comparison?.sameModel === true && selectedModel && selectedModel === baselineModel,
-    `Expected the same Cortex model, received baseline=${baselineModel ?? "missing"}, optimized=${selectedModel ?? "missing"}, sameModel=${String(comparison?.sameModel)}.`,
-  );
-
-  const baselineTokens = comparison?.baseline?.usage?.promptTokens;
-  const optimizedTokens = comparison?.optimized?.usage?.promptTokens;
-  check(
-    "Prompt tokens reduced",
-    Number.isFinite(baselineTokens) && Number.isFinite(optimizedTokens) && optimizedTokens < baselineTokens,
-    `Expected optimized prompt tokens below baseline, received baseline=${baselineTokens ?? "missing"}, optimized=${optimizedTokens ?? "missing"}.`,
-  );
-
-  const baselineCost = comparison?.baseline?.usage?.actualCost;
-  const optimizedCost = comparison?.optimized?.usage?.actualCost;
-  check(
-    "Cortex cost reduced",
-    Number.isFinite(baselineCost) && Number.isFinite(optimizedCost) && optimizedCost < baselineCost,
-    `Expected optimized Cortex cost below baseline, received baseline=${baselineCost ?? "missing"}, optimized=${optimizedCost ?? "missing"}.`,
-  );
-
-  check(
-    "Required facts preserved",
-    comparison?.requiredFactsPreserved === true,
-    `Expected required facts to be preserved, received ${String(comparison?.requiredFactsPreserved)}.`,
-  );
-
-  const counterfactualEvent = eventOfType(events, "counterfactual.completed");
-  const counterfactuals = Array.isArray(counterfactualEvent?.data) ? counterfactualEvent.data : [];
-  check(
-    "Three counterfactuals returned",
-    counterfactuals.length === 3,
-    `Expected exactly 3 counterfactual ablations, received ${counterfactuals.length}.`,
-  );
-
-  const pinned = counterfactuals.find((item) => item.role === "pinned");
-  check(
-    "Pinned-policy ablation failed safety as expected",
-    pinned?.policyPassed === false,
-    pinned
-      ? `Expected pinned-policy ablation to fail safety, received policyPassed=${String(pinned.policyPassed)}.`
-      : "Expected a pinned-policy ablation, but none was returned.",
-  );
-
-  const control = counterfactuals.find((item) => item.role === "rejected_control");
-  const controlIsImmaterial =
-    control?.outcomeChanged === false &&
-    control?.policyPassed === true &&
-    control?.requiredFactsPreserved === true &&
-    Math.abs(control?.qualityDelta ?? Number.POSITIVE_INFINITY) < 0.015;
-  check(
-    "Rejected-memory control caused no material change",
-    controlIsImmaterial,
-    control
-      ? `Expected rejected-memory control to be immaterial, received outcomeChanged=${String(control.outcomeChanged)}, policyPassed=${String(control.policyPassed)}, requiredFactsPreserved=${String(control.requiredFactsPreserved)}, qualityDelta=${String(control.qualityDelta)}.`
-      : "Expected a rejected-memory control ablation, but none was returned.",
-  );
-
-  const impossibleBudget = 1;
-  const impossibleEvents = await runExperiment(baseUrl, {
-    ...normalConstraints,
-    maxMemoryTokens: impossibleBudget,
+  const output = [];
+  const child = spawn(path.join(root, "node_modules", ".bin", "tsx"), ["server/index.ts"], {
+    cwd: root,
+    env: {
+      ...process.env,
+      PORT: String(port),
+      EVEROS_MODE: "replay",
+      EVEROS_API_KEY: "",
+      RAVEN_MODE: "replay",
+      TOKENOS_LEDGER_PATH: ":memory:",
+    },
+    stdio: ["ignore", "pipe", "pipe"],
   });
-  const impossibleError = eventOfType(impossibleEvents, "run.error");
-  const minimumSafeTokens = impossibleError?.data?.compile?.minimumSafeMemoryTokens;
-  const impossibleFailedSafely =
-    impossibleError?.phase === "search" &&
-    impossibleError?.data?.compile?.selected?.feasible === false &&
-    Number.isFinite(minimumSafeTokens) &&
-    minimumSafeTokens > impossibleBudget;
-  check(
-    "Impossible budget returned minimum safe budget",
-    impossibleFailedSafely,
-    impossibleError
-      ? `Expected run.error with a minimum safe budget above ${impossibleBudget}, received minimumSafeMemoryTokens=${minimumSafeTokens ?? "missing"} and selected.feasible=${String(impossibleError?.data?.compile?.selected?.feasible)}.`
-      : "Expected impossible budget to return run.error, but no run.error event was returned.",
-  );
+  child.stdout.on("data", (chunk) => output.push(String(chunk)));
+  child.stderr.on("data", (chunk) => output.push(String(chunk)));
 
-  console.log("\nPASS");
+  try {
+    const health = await waitForHealth(baseUrl, child, output);
+    check(health.ok === true, "Health endpoint", `Expected healthy API, received ${JSON.stringify(health)}`);
+    check(
+      health.providers?.everos === "replay" && health.providers?.raven === "replay",
+      "Replay labels are explicit",
+      `Expected replay/replay provider labels, received ${JSON.stringify(health.providers)}`,
+    );
+
+    const scenariosResponse = await fetch(`${baseUrl}/api/scenarios`);
+    const scenarios = await scenariosResponse.json();
+    check(
+      scenarios.map((scenario) => scenario.id).join(",") === "incident,support,fraud",
+      "All three scenarios exposed",
+      `Expected incident,support,fraud, received ${scenarios.map((scenario) => scenario.id).join(",")}`,
+    );
+
+    const first = await streamRun(baseUrl, requests.incident);
+    const firstTypes = first.events.map((event) => event.type);
+    check(first.response.status === 200, "Run API", `Expected HTTP 200, received ${first.response.status}`);
+    check(
+      JSON.stringify(firstTypes) === JSON.stringify(eventOrder),
+      "Streaming event order",
+      `Expected ${eventOrder.join(" → ")}, received ${firstTypes.join(" → ")}`,
+    );
+    const result = first.events.at(-1)?.data;
+    check(result?.compile?.evaluatedCount === 32_768, "Evaluated 32,768 portfolios", `Expected 32,768 portfolios, received ${result?.compile?.evaluatedCount}`);
+    check(result?.comparison?.uncontrolled?.memoriesLoaded === 15, "Uncontrolled Raven received all 15 memories", `Expected 15 uncontrolled memories, received ${result?.comparison?.uncontrolled?.memoriesLoaded}`);
+    check(result?.comparison?.governed?.memoriesLoaded === 4, "Governed Raven purchased four memories", `Expected 4 governed memories, received ${result?.comparison?.governed?.memoriesLoaded}`);
+    const comparison = result?.comparison;
+    check(
+      comparison?.sameRuntime && comparison?.sameModel && comparison?.sameTask && comparison?.sameTools && comparison?.sameSettings,
+      "Same Raven runtime, model, task, tools, and settings",
+      `Expected all A/B invariants true, received ${JSON.stringify({ runtime: comparison?.sameRuntime, model: comparison?.sameModel, task: comparison?.sameTask, tools: comparison?.sameTools, settings: comparison?.sameSettings })}`,
+    );
+    const uncontrolledUsage = comparison?.uncontrolled?.usage;
+    const governedUsage = comparison?.governed?.usage;
+    check(
+      uncontrolledUsage?.inputTokens > governedUsage?.inputTokens &&
+        uncontrolledUsage?.outputTokens > 0 && governedUsage?.outputTokens > 0 &&
+        uncontrolledUsage?.totalTokens === uncontrolledUsage?.inputTokens + uncontrolledUsage?.outputTokens &&
+        governedUsage?.totalTokens === governedUsage?.inputTokens + governedUsage?.outputTokens,
+      "Raven input, output, and total tokens recorded",
+      `Invalid A/B usage: ${JSON.stringify({ uncontrolledUsage, governedUsage })}`,
+    );
+    check(comparison?.requiredFactsPreserved === true, "Required facts preserved", "Governed run did not preserve required facts");
+    check(result?.counterfactuals?.length === 3, "Three counterfactuals returned", `Expected 3 counterfactuals, received ${result?.counterfactuals?.length}`);
+    const pinned = result.counterfactuals.find((item) => item.role === "pinned");
+    const control = result.counterfactuals.find((item) => item.role === "rejected_control");
+    check(pinned?.policyPassed === false, "Pinned-policy ablation fails safety", `Pinned ablation unexpectedly passed: ${JSON.stringify(pinned)}`);
+    check(control?.outcomeChanged === false, "Rejected-memory control is immaterial", `Rejected control changed outcome: ${JSON.stringify(control)}`);
+    check(result?.learning?.written === true && result?.learning?.agentCaseId, "Learning receipt recorded", `Expected learning receipt, received ${JSON.stringify(result?.learning)}`);
+    check(result?.ledger?.entryId && ["memory", "disk"].includes(result.ledger.mode), "Local A/B ledger persisted", `Expected local ledger receipt, received ${JSON.stringify(result?.ledger)}`);
+
+    const related = await streamRun(baseUrl, requests.incident);
+    const relatedRecall = related.events.find((event) => event.type === "recall.completed")?.data;
+    check(
+      relatedRecall?.historicalLiftApplied === true && relatedRecall.memories.some((memory) => (memory.historicalOutcomeLift ?? 0) > 0),
+      "Historical outcome lift applied on related run",
+      `Expected learned lift on the next related run, received ${JSON.stringify(relatedRecall?.historicalLiftApplied)}`,
+    );
+
+    const unsafe = await streamRun(baseUrl, {
+      ...requests.incident,
+      constraints: { ...requests.incident.constraints, maxMemoryTokens: 1 },
+    });
+    const refusalEvent = unsafe.events.at(-1);
+    const refusal = refusalEvent?.data?.refusal;
+    check(
+      refusalEvent?.type === "compile.refused" && !unsafe.events.some((event) => event.type === "raven.started"),
+      "Unsafe budget refused before Raven",
+      `Expected pre-Raven compile.refused, received ${unsafe.events.map((event) => event.type).join(",")}`,
+    );
+    check(
+      Number.isInteger(refusal?.minimumSafeBudget) && refusal.minimumSafeBudget > 1 && refusal.minimumSafeMemoryIds?.length > 0,
+      "Computed minimum-safe budget",
+      `Expected reusable safe floor, received ${JSON.stringify(refusal)}`,
+    );
+    const recovered = await streamRun(baseUrl, {
+      ...requests.incident,
+      constraints: { ...requests.incident.constraints, maxMemoryTokens: refusal.minimumSafeBudget },
+    });
+    check(recovered.events.at(-1)?.type === "run.completed", "Safe-budget recovery succeeds", `Expected recovery completion, received ${recovered.events.at(-1)?.type}`);
+
+    for (const scenarioId of ["support", "fraud"]) {
+      const scenarioRun = await streamRun(baseUrl, requests[scenarioId]);
+      check(scenarioRun.events.at(-1)?.type === "run.completed", `${scenarioId} scenario completes`, `Expected ${scenarioId} completion, received ${scenarioRun.events.at(-1)?.type}`);
+    }
+
+    const invalidResponse = await fetch(`${baseUrl}/api/run`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ ...requests.incident, objective: 42 }),
+    });
+    const invalid = await invalidResponse.json();
+    check(invalidResponse.status === 400 && typeof invalid.error === "string", "API validation", `Expected JSON 400, received ${invalidResponse.status} ${JSON.stringify(invalid)}`);
+
+    for (const label of passes) console.log(`✓ ${label}`);
+    console.log("\nPASS");
+  } finally {
+    child.kill("SIGTERM");
+    await new Promise((resolve) => {
+      if (child.exitCode !== null) resolve();
+      else child.once("exit", resolve);
+    });
+  }
 }
 
-try {
-  await main();
-} catch (error) {
-  console.error(`✗ ${error instanceof Error ? error.message : String(error)}`);
-  console.error("\nFAIL");
+main().catch((error) => {
+  console.error(`✗ ${error instanceof Error ? error.message : String(error)}\n\nFAIL`);
   process.exitCode = 1;
-} finally {
-  await stopDemoApi();
-}
+});

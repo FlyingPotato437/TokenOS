@@ -5,7 +5,7 @@ import { constants as fsConstants } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, isAbsolute, join } from "node:path";
 import { promisify } from "node:util";
-import type { MemoryCandidate, PlanCandidate, ProviderMode, Scenario } from "../shared/contracts.ts";
+import type { MemoryCandidate, PlanCandidate, Scenario } from "../shared/contracts.ts";
 import type {
   RavenExecutionContract,
   RavenProviderStatus,
@@ -23,7 +23,7 @@ export const RAVEN_GENERATION_CONFIG = {
 export type RavenExecutionResult = {
   answer: string;
   usage: RavenUsage;
-  mode: ProviderMode;
+  mode: "live" | "replay";
   model: string;
   tools: string[];
   detail: string;
@@ -54,14 +54,18 @@ async function executableAvailable(command: string) {
 
 export async function getRavenProviderStatus(): Promise<RavenProviderStatus> {
   const command = process.env.RAVEN_COMMAND?.trim() || "raven";
-  const ravenLive = await executableAvailable(command);
-  const everosLive = configured(process.env.EVEROS_API_KEY);
+  const ravenRequestedLive = process.env.RAVEN_MODE?.trim().toLowerCase() === "live";
+  const ravenAvailable = ravenRequestedLive && await executableAvailable(command);
+  const everosRequestedLive = process.env.EVEROS_MODE?.trim().toLowerCase() === "live";
+  const everosLive = everosRequestedLive && configured(process.env.EVEROS_API_KEY);
   return {
-    everos: everosLive ? "live" : "demo",
-    raven: ravenLive ? "live" : "demo",
-    message: ravenLive
-      ? `Raven execution is available; EverOS is ${everosLive ? "live" : "in deterministic replay mode"}.`
-      : "Raven is not installed on this machine, so the deterministic Raven replay is active.",
+    everos: everosLive ? "live" : "replay",
+    raven: ravenAvailable ? "live" : "replay",
+    message: ravenAvailable
+      ? `Raven live execution is available; EverOS is ${everosLive ? "live" : "in deterministic replay mode"}.`
+      : ravenRequestedLive
+        ? `Raven live mode was requested, but ${command} is unavailable; executions will fail rather than masquerade as live.`
+        : "Deterministic Raven replay is active. Set RAVEN_MODE=live only after Raven is installed and onboarded.",
   };
 }
 
@@ -203,7 +207,6 @@ function replayExecution(
   scenario: Scenario,
   prompt: string,
   contract: RavenExecutionContract,
-  mode: ProviderMode,
   detail: string,
 ): RavenExecutionResult {
   const answer = scenario.demoAnswer;
@@ -212,7 +215,7 @@ function replayExecution(
   return {
     answer,
     usage: { inputTokens, outputTokens, totalTokens: inputTokens + outputTokens, estimated: true },
-    mode,
+    mode: "replay",
     model: contract.model,
     tools: contract.tools,
     detail,
@@ -237,21 +240,25 @@ export async function executeRaven(input: {
     input.contract,
   );
   const command = process.env.RAVEN_COMMAND?.trim() || "raven";
-  if (input.forceReplay || !(await executableAvailable(command))) {
+  const liveRequested = process.env.RAVEN_MODE?.trim().toLowerCase() === "live";
+  if (input.forceReplay || !liveRequested) {
     return replayExecution(
       input.scenario,
       prompt,
       input.contract,
-      input.forceReplay ? "fallback" : "demo",
       input.forceReplay
-        ? "Using matched deterministic Raven replays after an execution-mode mismatch."
-        : "Using the deterministic Raven replay because the Raven CLI is unavailable.",
+        ? "Using an explicitly requested deterministic Raven replay."
+        : "Using deterministic Raven replay; counts are labeled estimates.",
     );
+  }
+  if (!(await executableAvailable(command))) {
+    throw new Error(`Raven live mode requires an executable ${command} command.`);
   }
 
   const traceDirectory = await mkdtemp(join(tmpdir(), `tokenos-raven-${input.kind}-`));
   const args = ["agent", "-m", prompt, "--no-markdown"];
   if (process.env.RAVEN_WORKSPACE?.trim()) args.push("--workspace", process.env.RAVEN_WORKSPACE.trim());
+  if (process.env.RAVEN_CONFIG_PATH?.trim()) args.push("--config", process.env.RAVEN_CONFIG_PATH.trim());
 
   try {
     const timeout = Math.max(10_000, Number(process.env.RAVEN_TIMEOUT_MS ?? 120_000));
@@ -271,31 +278,19 @@ export async function executeRaven(input: {
     const answer = structured?.answer || cleanRavenOutput(stdout);
     if (!answer) throw new Error("Raven returned no answer text");
     const measuredUsage = traces.usage ?? usageFromWrapper(structured?.usage);
-    const inputTokens = estimateTokens(prompt);
-    const outputTokens = estimateTokens(answer);
+    if (!measuredUsage) {
+      throw new Error("Raven live execution returned no provider token usage in its isolated trace");
+    }
     return {
       answer,
-      usage: measuredUsage ?? {
-        inputTokens,
-        outputTokens,
-        totalTokens: inputTokens + outputTokens,
-        estimated: true,
-      },
+      usage: measuredUsage,
       mode: "live",
       model: traces.model ?? input.contract.model,
       tools: input.contract.tools,
-      detail: measuredUsage
-        ? `Raven ${input.kind} execution completed; token usage was read from Raven's own LLM trace.`
-        : `Raven ${input.kind} execution completed; this provider omitted usage, so token counts are labeled estimates.`,
+      detail: `Raven ${input.kind} execution completed; token usage was read from Raven's own LLM trace.`,
     };
   } catch (error) {
-    return replayExecution(
-      input.scenario,
-      prompt,
-      input.contract,
-      "fallback",
-      `Raven replay fallback: ${error instanceof Error ? error.message : "execution failed"}.`,
-    );
+    throw new Error(`Raven live execution failed: ${error instanceof Error ? error.message : "execution failed"}.`);
   } finally {
     await rm(traceDirectory, { recursive: true, force: true });
   }
