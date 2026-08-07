@@ -10,6 +10,7 @@
     "build": "tsc -b && tsc --noEmit -p tsconfig.server.json && vite build",
     "lint": "eslint .",
     "preview": "vite preview",
+    "smoke": "node scripts/smoke.mjs",
     "start": "tsx server/index.ts"
   },
   "dependencies": {
